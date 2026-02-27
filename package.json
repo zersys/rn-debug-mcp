@@ -1,0 +1,27 @@
+{
+  "name": "@rndb/server",
+  "version": "0.1.0",
+  "description": "React Native Debug Bridge MCP server",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "bin": {
+    "rndb": "dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test dist/tests/**/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.3"
+  }
+}
