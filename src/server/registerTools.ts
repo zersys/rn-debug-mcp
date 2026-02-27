@@ -4,26 +4,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { parseLogcatLine, isErrorLevel } from "../core/logParser.js";
+import { parseIosLogLine } from "../core/iosLogParser.js";
 import { parseNetworkEvent } from "../core/networkParser.js";
 import { retryWithBackoff } from "../core/retry.js";
 import { SessionManager } from "../core/sessionManager.js";
 import { ToolError } from "../core/toolError.js";
 import { buildScreenContext } from "../core/screenContext.js";
+import { buildIosScreenContext } from "../core/iosScreenContext.js";
 import { buildRemediationPlan } from "../core/testIdRemediation.js";
 import { extractScreenTestIds, extractVisibleElements } from "../core/visibleElements.js";
 import type { ScreenshotResult } from "../adapters/adb.js";
 import type { SpawnedProcess } from "../adapters/processRunner.js";
-import type { LogBuffer } from "../core/logBuffer.js";
-import type { NetworkBuffer } from "../core/networkBuffer.js";
+import { LogBuffer } from "../core/logBuffer.js";
+import { NetworkBuffer } from "../core/networkBuffer.js";
 import {
+  DEFAULT_LOG_BUFFER_SIZE,
   DEFAULT_LOG_LIMIT,
+  DEFAULT_NETWORK_BUFFER_SIZE,
   DEFAULT_NETWORK_LIMIT,
   DEFAULT_METRO_PORT,
   MAX_LOG_LIMIT,
   MAX_NETWORK_LIMIT,
+  closeSessionInputSchema,
   connectAppInputSchema,
   connectionStatusInputSchema,
   disconnectAppInputSchema,
+  listSessionsInputSchema,
   getScreenContextInputSchema,
   getTestIdRemediationPlanInputSchema,
   getElementsByTestIdInputSchema,
@@ -35,19 +41,25 @@ import {
   pressBackInputSchema,
   reloadAppInputSchema,
   scrollInputSchema,
+  setActiveSessionInputSchema,
   tapElementInputSchema,
   tapInputSchema,
   takeScreenshotInputSchema,
   typeTextInputSchema,
+  type Platform,
   type ConnectionStatusOutput,
+  type CloseSessionOutput,
   type ConnectAppOutput,
   type DisconnectAppOutput,
   type NetworkRequestEntry,
   type GetNetworkRequestsInput,
   type GetNetworkRequestsOutput,
+  type ListSessionsOutput,
   type LogEntry,
   type PressBackOutput,
   type GetScreenTestIdsInput,
+  type SessionSummary,
+  type SetActiveSessionOutput,
   type ScrollOutput,
   type ScreenContextOutput,
   type GetElementsByTestIdInput,
@@ -75,9 +87,10 @@ import {
 
 export interface ToolDependencies {
   sessionManager: SessionManager;
-  logBuffer: LogBuffer;
-  networkBuffer: NetworkBuffer;
+  logBuffer?: LogBuffer;
+  networkBuffer?: NetworkBuffer;
   adb: AdbToolAdapter;
+  ios: IosToolAdapter;
   metro: MetroToolAdapter;
 }
 
@@ -112,6 +125,33 @@ export interface MetroToolAdapter {
   checkStatus(port: number): Promise<void>;
   probeInspector(port: number): Promise<void>;
   reload(port: number): Promise<void>;
+}
+
+export interface IosToolAdapter {
+  checkAvailability(): Promise<void>;
+  ensureWdaReady(deviceId: string): Promise<SpawnedProcess | undefined>;
+  deleteSession(deviceId: string): Promise<void>;
+  resolveDeviceId(requested?: string): Promise<string>;
+  startLogStream(deviceId: string, onLine: (line: string) => void): Promise<SpawnedProcess>;
+  reloadViaKeyboard(): Promise<void>;
+  tap(deviceId: string, x: number, y: number): Promise<void>;
+  typeText(deviceId: string, text: string, submit?: boolean): Promise<void>;
+  pressBack(deviceId: string): Promise<void>;
+  scroll(
+    deviceId: string,
+    direction: "up" | "down" | "left" | "right",
+    distanceRatio?: number,
+    durationMs?: number,
+  ): Promise<{ from: { x: number; y: number }; to: { x: number; y: number }; durationMs: number }>;
+  takeScreenshot(deviceId: string): Promise<ScreenshotResult>;
+  getUiTree(deviceId: string, options?: { maxDepth?: number; maxNodes?: number }): Promise<{
+    root?: UiTreeOutput["root"];
+    nodeCount: number;
+    clickableCount: number;
+    truncated: boolean;
+    source: "wda";
+  }>;
+  getActiveAppInfo(deviceId: string): Promise<{ bundleId?: string; name?: string }>;
 }
 
 interface ToolResult {
@@ -194,6 +234,31 @@ const DEFAULT_UI_TREE_MAX_NODES = 5000;
 const DEFAULT_VISIBLE_ELEMENTS_LIMIT = 150;
 const DEFAULT_SCREEN_TEST_IDS_LIMIT = 300;
 const REMEDIATION_CANDIDATE_LIMIT = 20;
+const RECONNECT_RETRY = {
+  retries: 3,
+  initialDelayMs: 500,
+  factor: 2,
+  maxDelayMs: 3000,
+};
+
+interface SessionBuffers {
+  logBuffer: LogBuffer;
+  networkBuffer: NetworkBuffer;
+}
+
+interface SessionRuntime {
+  sessionId: string;
+  platform: Platform;
+  deviceId: string;
+  collector?: SpawnedProcess;
+  helperProcesses: SpawnedProcess[];
+  stopped: boolean;
+  onLine: (line: string) => void;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function isTransientToolError(error: unknown): boolean {
   if (!(error instanceof ToolError)) {
@@ -203,6 +268,7 @@ function isTransientToolError(error: unknown): boolean {
   return (
     error.code === "METRO_UNREACHABLE" ||
     error.code === "ADB_UNAVAILABLE" ||
+    error.code === "IOS_UNAVAILABLE" ||
     error.code === "DEVICE_NOT_FOUND" ||
     error.code === "COMMAND_FAILED"
   );
@@ -386,11 +452,34 @@ function recommendedFallbackFor(params: {
   return params.hasAnyElements ? "tap_element" : "tap_coordinates";
 }
 
-async function getScreenContextForSession(session: { deviceId: string }, adb: AdbToolAdapter): Promise<ScreenContextOutput> {
+async function getScreenContextForSession(
+  session: { sessionId: string; platform: Platform; deviceId: string },
+  adapters: { adb: AdbToolAdapter; ios: IosToolAdapter },
+): Promise<ScreenContextOutput> {
+  if (session.platform === "ios") {
+    const [appInfo, uiTree] = await Promise.all([
+      adapters.ios
+        .getActiveAppInfo(session.deviceId)
+        .catch((): { bundleId?: string; name?: string } => ({})),
+      adapters.ios
+        .getUiTree(session.deviceId, { maxDepth: DEFAULT_UI_TREE_MAX_DEPTH, maxNodes: DEFAULT_UI_TREE_MAX_NODES })
+        .catch(() => null),
+    ]);
+
+    return buildIosScreenContext({
+      sessionId: session.sessionId,
+      deviceId: session.deviceId,
+      capturedAt: new Date().toISOString(),
+      bundleId: appInfo.bundleId,
+      appName: appInfo.name,
+      uiRoot: uiTree?.root,
+    });
+  }
+
   const [activityDump, windowDump, uiTree] = await Promise.all([
-    adb.getActivityDump(session.deviceId).catch(() => ""),
-    adb.getWindowDump(session.deviceId).catch(() => ""),
-    adb
+    adapters.adb.getActivityDump(session.deviceId).catch(() => ""),
+    adapters.adb.getWindowDump(session.deviceId).catch(() => ""),
+    adapters.adb
       .getUiTree(session.deviceId, { maxDepth: DEFAULT_UI_TREE_MAX_DEPTH, maxNodes: DEFAULT_UI_TREE_MAX_NODES })
       .catch(() => null),
   ]);
@@ -405,49 +494,119 @@ async function getScreenContextForSession(session: { deviceId: string }, adb: Ad
 }
 
 export function registerTools(server: McpServer, deps: ToolDependencies): void {
-  const { sessionManager, logBuffer, networkBuffer, adb, metro } = deps;
+  const { sessionManager, adb, ios, metro } = deps;
+  const logCapacity = deps.logBuffer?.capacity() ?? DEFAULT_LOG_BUFFER_SIZE;
+  const networkCapacity = deps.networkBuffer?.capacity() ?? DEFAULT_NETWORK_BUFFER_SIZE;
+  const sessionBuffers = new Map<string, SessionBuffers>();
+  const sessionRuntimes = new Map<string, SessionRuntime>();
+
+  const getBuffers = (sessionId: string): SessionBuffers => {
+    const buffers = sessionBuffers.get(sessionId);
+    if (!buffers) {
+      throw new ToolError("NO_SESSION", `No buffers found for session '${sessionId}'`);
+    }
+    return buffers;
+  };
+
+  const parseLogForPlatform = (platform: Platform, line: string): Omit<LogEntry, "cursor"> => {
+    return platform === "ios" ? parseIosLogLine(line) : parseLogcatLine(line);
+  };
+
+  const appendRuntimeLine = (runtime: SessionRuntime, line: string): void => {
+    const buffers = sessionBuffers.get(runtime.sessionId);
+    if (!buffers) {
+      return;
+    }
+
+    const parsed = parseLogForPlatform(runtime.platform, line);
+    buffers.logBuffer.append(parsed);
+    const networkEvent = parseNetworkEvent(line);
+    if (networkEvent) {
+      buffers.networkBuffer.append(networkEvent);
+    }
+  };
+
+  const startCollector = async (runtime: SessionRuntime): Promise<SpawnedProcess> => {
+    if (runtime.platform === "ios") {
+      return ios.startLogStream(runtime.deviceId, runtime.onLine);
+    }
+
+    return adb.startLogcat(runtime.deviceId, runtime.onLine);
+  };
+
+  const attachCollectorExit = (runtime: SessionRuntime): void => {
+    const collector = runtime.collector;
+    if (!collector) {
+      return;
+    }
+
+    void collector.exited.then(async ({ code, signal }) => {
+      if (runtime.stopped || !sessionManager.hasSession(runtime.sessionId)) {
+        return;
+      }
+
+      if (code === 0 && signal === null) {
+        return;
+      }
+
+      sessionManager.markReconnecting(runtime.sessionId);
+      let delay = RECONNECT_RETRY.initialDelayMs;
+      let lastError = "collector exited";
+      for (let attempt = 0; attempt < RECONNECT_RETRY.retries; attempt += 1) {
+        try {
+          runtime.collector = await startCollector(runtime);
+          attachCollectorExit(runtime);
+          sessionManager.markHealthy(runtime.sessionId);
+          return;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+          await sleep(delay);
+          delay = Math.min(Math.floor(delay * RECONNECT_RETRY.factor), RECONNECT_RETRY.maxDelayMs);
+        }
+      }
+
+      sessionManager.markReconnectFailure(runtime.sessionId, lastError);
+    });
+  };
 
   server.registerTool(
     "connect_app",
-    { description: "Connect to a running React Native app on Android emulator and start log collection.", inputSchema: connectAppInputSchema.shape },
+    {
+      description: "Connect to a running React Native app session on Android emulator or iOS simulator and start log collection.",
+      inputSchema: connectAppInputSchema.shape,
+    },
     async (input): Promise<ToolResult> => {
-      let beganConnecting = false;
+      let createdSessionId: string | undefined;
+      let startedWdaProcess: SpawnedProcess | undefined;
       try {
-        sessionManager.beginConnecting();
-        beganConnecting = true;
-        logBuffer.clear();
-        networkBuffer.clear();
-
-        await retryWithBackoff(() => adb.checkAvailability(), {
-          ...CONNECT_RETRY,
-          shouldRetry: isTransientToolError,
-        });
-        const deviceId = await retryWithBackoff(() => adb.resolveDeviceId(input.deviceId), {
-          ...CONNECT_RETRY,
-          shouldRetry: isTransientToolError,
-        });
+        const platform = input.platform ?? "android";
         const metroPort = input.metroPort ?? DEFAULT_METRO_PORT;
 
-        await retryWithBackoff(() => metro.checkStatus(metroPort), {
+        await retryWithBackoff(() => (platform === "ios" ? ios.checkAvailability() : adb.checkAvailability()), {
           ...CONNECT_RETRY,
           shouldRetry: isTransientToolError,
         });
 
-        const logcatProcess = await retryWithBackoff(
-          () =>
-            adb.startLogcat(deviceId, (line) => {
-              const parsed = parseLogcatLine(line);
-              logBuffer.append(parsed);
-              const networkEvent = parseNetworkEvent(line);
-              if (networkEvent) {
-                networkBuffer.append(networkEvent);
-              }
-            }),
+        const deviceId = await retryWithBackoff(
+          () => (platform === "ios" ? ios.resolveDeviceId(input.deviceId) : adb.resolveDeviceId(input.deviceId)),
           {
             ...CONNECT_RETRY,
             shouldRetry: isTransientToolError,
           },
         );
+
+        if (platform === "ios") {
+          startedWdaProcess = await retryWithBackoff(() => ios.ensureWdaReady(deviceId), {
+            ...CONNECT_RETRY,
+            retries: 1,
+            shouldRetry: isTransientToolError,
+          });
+        }
+
+        await retryWithBackoff(() => metro.checkStatus(metroPort), {
+          ...CONNECT_RETRY,
+          shouldRetry: isTransientToolError,
+        });
 
         await retryWithBackoff(() => metro.probeInspector(metroPort), {
           ...CONNECT_RETRY,
@@ -456,17 +615,58 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           shouldRetry: isTransientToolError,
         });
 
-        sessionManager.addCleanup(async () => {
-          await logcatProcess.stop();
+        const session = sessionManager.createSession(platform, deviceId, metroPort);
+        createdSessionId = session.sessionId;
+        const buffers: SessionBuffers = {
+          logBuffer: new LogBuffer(logCapacity),
+          networkBuffer: new NetworkBuffer(networkCapacity),
+        };
+        sessionBuffers.set(session.sessionId, buffers);
+
+        let runtime!: SessionRuntime;
+        runtime = {
+          sessionId: session.sessionId,
+          platform,
+          deviceId,
+          helperProcesses: startedWdaProcess ? [startedWdaProcess] : [],
+          stopped: false,
+          onLine: (line) => appendRuntimeLine(runtime, line),
+        };
+
+        runtime.collector = await retryWithBackoff(() => startCollector(runtime), {
+          ...CONNECT_RETRY,
+          shouldRetry: isTransientToolError,
+        });
+        sessionRuntimes.set(session.sessionId, runtime);
+        attachCollectorExit(runtime);
+
+        sessionManager.addCleanupForSession(session.sessionId, async () => {
+          runtime.stopped = true;
+          const collector = runtime.collector;
+          if (collector) {
+            await collector.stop();
+          }
+          if (runtime.platform === "ios") {
+            await ios.deleteSession(runtime.deviceId).catch(() => {});
+          }
+          for (const process of runtime.helperProcesses) {
+            await process.stop();
+          }
+          sessionRuntimes.delete(session.sessionId);
+          sessionBuffers.delete(session.sessionId);
         });
 
-        const state = sessionManager.setConnected(deviceId, metroPort);
         const payload: ConnectAppOutput = {
           connected: true,
-          deviceId: state.deviceId!,
-          metroPort: state.metroPort!,
-          startedAt: state.startedAt!,
+          sessionId: session.sessionId,
+          platform: session.platform,
+          deviceId: session.deviceId,
+          metroPort: session.metroPort,
+          startedAt: session.startedAt,
           capabilities: [
+            "list_sessions",
+            "set_active_session",
+            "close_session",
             "get_connection_status",
             "reload_app",
             "get_logs",
@@ -489,8 +689,13 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
         return ok(payload);
       } catch (error) {
-        if (beganConnecting) {
-          await sessionManager.reset();
+        if (createdSessionId && sessionManager.hasSession(createdSessionId)) {
+          await sessionManager.closeSession(createdSessionId);
+        } else {
+          sessionManager.clearLegacyConnecting();
+        }
+        if (startedWdaProcess && !createdSessionId) {
+          await startedWdaProcess.stop().catch(() => {});
         }
         return fail(error);
       }
@@ -500,16 +705,26 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
   server.registerTool(
     "get_connection_status",
     { description: "Get current RN Inspector MCP session status and log buffer state.", inputSchema: connectionStatusInputSchema.shape },
-    async (): Promise<ToolResult> => {
+    async (input): Promise<ToolResult> => {
       try {
-        const state = sessionManager.getState();
+        const summary = sessionManager.getSessionSummary(input.sessionId);
+        const activeSessionId = sessionManager.getFallbackActiveSessionId();
+        const buffers = summary ? sessionBuffers.get(summary.sessionId) : undefined;
+        const state = sessionManager.getState(input.sessionId);
         const payload: ConnectionStatusOutput = {
           status: state.status,
+          activeSessionId,
+          sessionId: summary?.sessionId,
+          platform: summary?.platform,
           deviceId: state.deviceId,
           metroPort: state.metroPort,
           startedAt: state.startedAt,
-          logBufferSize: logBuffer.size(),
-          networkBufferSize: networkBuffer.size(),
+          logBufferSize: buffers?.logBuffer.size() ?? 0,
+          networkBufferSize: buffers?.networkBuffer.size() ?? 0,
+          connectionHealth: summary?.connectionHealth,
+          reconnectAttempts: summary?.reconnectAttempts,
+          lastDisconnectAt: summary?.lastDisconnectAt,
+          lastReconnectError: summary?.lastReconnectError,
         };
         return ok(payload);
       } catch (error) {
@@ -521,13 +736,64 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
   server.registerTool(
     "disconnect_app",
     { description: "Disconnect the active React Native app session.", inputSchema: disconnectAppInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        let targetSessionId = input.sessionId;
+        if (!targetSessionId) {
+          targetSessionId = sessionManager.getFallbackActiveSessionId();
+        }
+
+        if (targetSessionId) {
+          await sessionManager.closeSession(targetSessionId);
+        }
+
+        const payload: DisconnectAppOutput = { disconnected: true, sessionId: targetSessionId };
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_sessions",
+    { description: "List all active MCP device sessions.", inputSchema: listSessionsInputSchema.shape },
     async (): Promise<ToolResult> => {
       try {
-        await sessionManager.reset();
-        logBuffer.clear();
-        networkBuffer.clear();
+        const sessions = sessionManager.listSessions();
+        const payload: ListSessionsOutput = {
+          activeSessionId: sessionManager.getFallbackActiveSessionId(),
+          count: sessions.length,
+          sessions,
+        };
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
 
-        const payload: DisconnectAppOutput = { disconnected: true };
+  server.registerTool(
+    "set_active_session",
+    { description: "Set the active session used when sessionId is omitted.", inputSchema: setActiveSessionInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        sessionManager.setActiveSession(input.sessionId);
+        const payload: SetActiveSessionOutput = { activeSessionId: input.sessionId };
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "close_session",
+    { description: "Close a specific session by sessionId.", inputSchema: closeSessionInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        await sessionManager.closeSession(input.sessionId);
+        const payload: CloseSessionOutput = { closed: true, sessionId: input.sessionId };
         return ok(payload);
       } catch (error) {
         return fail(error);
@@ -538,18 +804,31 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
   server.registerTool(
     "reload_app",
     { description: "Reload the active app session via Metro, with ADB fallback.", inputSchema: reloadAppInputSchema.shape },
-    async (): Promise<ToolResult> => {
+    async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
 
         try {
           await retryWithBackoff(() => metro.reload(session.metroPort), {
             ...RELOAD_RETRY,
             shouldRetry: isTransientToolError,
           });
-          const payload: ReloadAppOutput = { reloaded: true, method: "metro" };
+          const payload: ReloadAppOutput = { reloaded: true, method: "metro", sessionId: session.sessionId };
           return ok(payload);
         } catch (metroError) {
+          if (session.platform === "ios") {
+            await retryWithBackoff(() => ios.reloadViaKeyboard(), {
+              ...RELOAD_RETRY,
+              shouldRetry: isTransientToolError,
+            });
+            const payload: ReloadAppOutput = {
+              reloaded: true,
+              method: "ios_simulator_keyboard_fallback",
+              sessionId: session.sessionId,
+            };
+            return ok(payload);
+          }
+
           try {
             await retryWithBackoff(() => adb.reloadViaBroadcast(session.deviceId), {
               ...RELOAD_RETRY,
@@ -562,7 +841,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
             });
           }
 
-          const payload: ReloadAppOutput = { reloaded: true, method: "adb_fallback" };
+          const payload: ReloadAppOutput = { reloaded: true, method: "adb_fallback", sessionId: session.sessionId };
           return ok(payload);
         }
       } catch (error) {
@@ -576,9 +855,10 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     { description: "Read buffered non-error logs using cursor-based pagination.", inputSchema: getLogsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
+        const buffers = getBuffers(session.sessionId);
 
-        const result = logBuffer.query({
+        const result = buffers.logBuffer.query({
           sinceCursor: input.sinceCursor,
           limit: clampLimit(input.limit),
           predicate: (entry) => !isErrorLevel(entry.level) && applyLogFilters(entry, input),
@@ -601,9 +881,10 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     { description: "Read buffered error and fatal logs using cursor-based pagination.", inputSchema: getLogsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
+        const buffers = getBuffers(session.sessionId);
 
-        const result = logBuffer.query({
+        const result = buffers.logBuffer.query({
           sinceCursor: input.sinceCursor,
           limit: clampLimit(input.limit),
           predicate: (entry) => isErrorLevel(entry.level) && applyLogFilters(entry, input),
@@ -629,9 +910,10 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
     async (input): Promise<ToolResult> => {
       try {
-        sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
+        const buffers = getBuffers(session.sessionId);
 
-        const result = networkBuffer.query({
+        const result = buffers.networkBuffer.query({
           sinceCursor: input.sinceCursor,
           limit: clampNetworkLimit(input.limit),
           predicate: (entry) => applyNetworkFilters(entry, input),
@@ -652,10 +934,10 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
   server.registerTool(
     "get_screen_context",
     { description: "Get inferred current Android screen context for remediation guidance. Use after testID lookup fails.", inputSchema: getScreenContextInputSchema.shape },
-    async (): Promise<ToolResult> => {
+    async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
-        const payload = await getScreenContextForSession(session, adb);
+        const session = sessionManager.requireConnected(input.sessionId);
+        const payload = await getScreenContextForSession(session, { adb, ios });
         return ok(payload);
       } catch (error) {
         return fail(error);
@@ -669,9 +951,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     async (input): Promise<ToolResult> => {
       try {
         const typedInput = input as GetTestIdRemediationPlanInput;
-        const session = sessionManager.requireConnected();
-        const screenContext = await getScreenContextForSession(session, adb);
-        const uiTree = await adb
+        const session = sessionManager.requireConnected(input.sessionId);
+        const screenContext = await getScreenContextForSession(session, { adb, ios });
+        const uiTree = await (session.platform === "ios" ? ios : adb)
           .getUiTree(session.deviceId, {
             maxDepth: DEFAULT_UI_TREE_MAX_DEPTH,
             maxNodes: DEFAULT_UI_TREE_MAX_NODES,
@@ -702,15 +984,16 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "get_ui_tree",
-    { description: "Read the Android accessibility hierarchy via UIAutomator XML dump.", inputSchema: getUiTreeInputSchema.shape },
+    { description: "Read the current accessibility hierarchy from Android UIAutomator or iOS WDA.", inputSchema: getUiTreeInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
         const options = resolveUiTreeOptions(input);
-        const uiTree = await adb.getUiTree(session.deviceId, options);
+        const uiTree = await (session.platform === "ios" ? ios : adb).getUiTree(session.deviceId, options);
 
         const payload: UiTreeOutput = {
-          platform: "android",
+          sessionId: session.sessionId,
+          platform: session.platform,
           source: uiTree.source,
           deviceId: session.deviceId,
           capturedAt: new Date().toISOString(),
@@ -731,12 +1014,12 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "get_visible_elements",
-    { description: "Return flattened visible Android accessibility elements derived from the current UI tree. Use as fallback discovery after testID-first lookup.", inputSchema: getVisibleElementsInputSchema.shape },
+    { description: "Return flattened visible accessibility elements derived from the current UI tree. Use as fallback discovery after testID-first lookup.", inputSchema: getVisibleElementsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
         const options = resolveVisibleOptions(input);
-        const uiTree = await adb.getUiTree(session.deviceId, {
+        const uiTree = await (session.platform === "ios" ? ios : adb).getUiTree(session.deviceId, {
           maxDepth: options.maxDepth,
           maxNodes: options.maxNodes,
         });
@@ -751,7 +1034,8 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         });
 
         const payload: VisibleElementsOutput = {
-          platform: "android",
+          sessionId: session.sessionId,
+          platform: session.platform,
           source: uiTree.source,
           deviceId: session.deviceId,
           capturedAt: new Date().toISOString(),
@@ -787,9 +1071,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     { description: "List testIDs present on the current screen with metadata. Start UI interaction flows with this tool before get_elements_by_test_id.", inputSchema: getScreenTestIdsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
         const options = resolveScreenTestIdsOptions(input);
-        const uiTree = await adb.getUiTree(session.deviceId, {
+        const uiTree = await (session.platform === "ios" ? ios : adb).getUiTree(session.deviceId, {
           maxDepth: options.maxDepth,
           maxNodes: options.maxNodes,
         });
@@ -801,7 +1085,8 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         });
 
         const payload: ScreenTestIdsOutput = {
-          platform: "android",
+          sessionId: session.sessionId,
+          platform: session.platform,
           source: uiTree.source,
           deviceId: session.deviceId,
           capturedAt: new Date().toISOString(),
@@ -826,12 +1111,12 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "get_elements_by_test_id",
-    { description: "Find visible Android elements matching a React Native testID (from resource-id tail). Use exact first, then contains. If none, call get_screen_context + get_test_id_remediation_plan.", inputSchema: getElementsByTestIdInputSchema.shape },
+    { description: "Find visible elements matching a React Native testID. Use exact first, then contains. If none, call get_screen_context + get_test_id_remediation_plan.", inputSchema: getElementsByTestIdInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
         const options = resolveVisibleOptions(input as GetElementsByTestIdInput);
-        const uiTree = await adb.getUiTree(session.deviceId, {
+        const uiTree = await (session.platform === "ios" ? ios : adb).getUiTree(session.deviceId, {
           maxDepth: options.maxDepth,
           maxNodes: options.maxNodes,
         });
@@ -846,7 +1131,8 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         });
 
         const payload: VisibleElementsOutput = {
-          platform: "android",
+          sessionId: session.sessionId,
+          platform: session.platform,
           source: uiTree.source,
           deviceId: session.deviceId,
           capturedAt: new Date().toISOString(),
@@ -879,11 +1165,11 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "tap",
-    { description: "Tap the Android screen at absolute coordinates. Final fallback only when testID and element-based targeting fail.", inputSchema: tapInputSchema.shape },
+    { description: "Tap the screen at absolute coordinates. Final fallback only when testID and element-based targeting fail.", inputSchema: tapInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
-        await retryWithBackoff(() => adb.tap(session.deviceId, input.x, input.y), {
+        const session = sessionManager.requireConnected(input.sessionId);
+        await retryWithBackoff(() => (session.platform === "ios" ? ios : adb).tap(session.deviceId, input.x, input.y), {
           ...INTERACTION_RETRY,
           shouldRetry: isTransientToolError,
         });
@@ -891,6 +1177,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const payload: TapOutput = {
           tapped: true,
           method: "coordinates",
+          sessionId: session.sessionId,
           deviceId: session.deviceId,
           x: input.x,
           y: input.y,
@@ -905,19 +1192,23 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "type_text",
-    { description: "Type text into the currently focused Android input field, with optional submit/enter key press.", inputSchema: typeTextInputSchema.shape },
+    { description: "Type text into the currently focused input field, with optional submit/enter key press.", inputSchema: typeTextInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         const typedInput = input as TypeTextInput;
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(typedInput.sessionId);
         const submit = typedInput.submit ?? false;
-        await retryWithBackoff(() => adb.typeText(session.deviceId, typedInput.text, submit), {
-          ...INTERACTION_RETRY,
-          shouldRetry: isTransientToolError,
-        });
+        await retryWithBackoff(
+          () => (session.platform === "ios" ? ios : adb).typeText(session.deviceId, typedInput.text, submit),
+          {
+            ...INTERACTION_RETRY,
+            shouldRetry: isTransientToolError,
+          },
+        );
 
         const payload: TypeTextOutput = {
           typed: true,
+          sessionId: session.sessionId,
           deviceId: session.deviceId,
           textLength: typedInput.text.length,
           submitted: submit,
@@ -931,11 +1222,11 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "press_back",
-    { description: "Press Android back button (keyevent 4).", inputSchema: pressBackInputSchema.shape },
-    async (): Promise<ToolResult> => {
+    { description: "Trigger back navigation on the current platform.", inputSchema: pressBackInputSchema.shape },
+    async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
-        await retryWithBackoff(() => adb.pressBack(session.deviceId), {
+        const session = sessionManager.requireConnected(input.sessionId);
+        await retryWithBackoff(() => (session.platform === "ios" ? ios : adb).pressBack(session.deviceId), {
           ...INTERACTION_RETRY,
           shouldRetry: isTransientToolError,
         });
@@ -943,6 +1234,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const payload: PressBackOutput = {
           pressed: true,
           key: "back",
+          sessionId: session.sessionId,
           deviceId: session.deviceId,
         };
         return ok(payload);
@@ -957,9 +1249,15 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     { description: "Scroll screen content in a direction via swipe gesture.", inputSchema: scrollInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
         const result = await retryWithBackoff(
-          () => adb.scroll(session.deviceId, input.direction, input.distanceRatio, input.durationMs),
+          () =>
+            (session.platform === "ios" ? ios : adb).scroll(
+              session.deviceId,
+              input.direction,
+              input.distanceRatio,
+              input.durationMs,
+            ),
           {
             ...INTERACTION_RETRY,
             shouldRetry: isTransientToolError,
@@ -969,6 +1267,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const payload: ScrollOutput = {
           scrolled: true,
           direction: input.direction,
+          sessionId: session.sessionId,
           deviceId: session.deviceId,
           from: result.from,
           to: result.to,
@@ -986,9 +1285,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     { description: "Tap a visible element by element id from get_visible_elements/get_ui_tree. Preferred fallback before coordinate tapping.", inputSchema: tapElementInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
+        const session = sessionManager.requireConnected(input.sessionId);
         const options = resolveTapElementOptions(input);
-        const uiTree = await adb.getUiTree(session.deviceId, {
+        const uiTree = await (session.platform === "ios" ? ios : adb).getUiTree(session.deviceId, {
           maxDepth: options.maxDepth,
           maxNodes: options.maxNodes,
         });
@@ -1001,7 +1300,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         }
 
         const point = centerFromBounds(node);
-        await retryWithBackoff(() => adb.tap(session.deviceId, point.x, point.y), {
+        await retryWithBackoff(() => (session.platform === "ios" ? ios : adb).tap(session.deviceId, point.x, point.y), {
           ...INTERACTION_RETRY,
           shouldRetry: isTransientToolError,
         });
@@ -1009,6 +1308,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const payload: TapOutput = {
           tapped: true,
           method: "element",
+          sessionId: session.sessionId,
           deviceId: session.deviceId,
           x: point.x,
           y: point.y,
@@ -1024,11 +1324,11 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
 
   server.registerTool(
     "take_screenshot",
-    { description: "Capture a screenshot from the connected Android device.", inputSchema: takeScreenshotInputSchema.shape },
-    async (): Promise<ToolResult> => {
+    { description: "Capture a screenshot from the connected device.", inputSchema: takeScreenshotInputSchema.shape },
+    async (input): Promise<ToolResult> => {
       try {
-        const session = sessionManager.requireConnected();
-        const screenshot = await adb.takeScreenshot(session.deviceId);
+        const session = sessionManager.requireConnected(input.sessionId);
+        const screenshot = await (session.platform === "ios" ? ios : adb).takeScreenshot(session.deviceId);
         const imageBase64 = screenshot.png.toString("base64");
         const tempPath = join(tmpdir(), `rndb-screenshot-${Date.now()}-${randomUUID()}.png`);
         await writeFile(tempPath, screenshot.png);
@@ -1037,6 +1337,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           mimeType: "image/png",
           width: screenshot.width,
           height: screenshot.height,
+          sessionId: session.sessionId,
           deviceId: session.deviceId,
           capturedAt: new Date().toISOString(),
           tempPath,

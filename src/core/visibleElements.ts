@@ -12,10 +12,14 @@ export interface ScreenTestIdsExtractionResult {
 }
 
 function buildLabel(node: UiNode): string | undefined {
-  return node.text ?? node.contentDescription ?? node.resourceId;
+  return node.text ?? node.contentDescription ?? extractTestId(node) ?? node.resourceId;
 }
 
 function extractTestId(node: UiNode): string | undefined {
+  if (node.testId) {
+    return node.testId;
+  }
+
   if (!node.resourceId) {
     return undefined;
   }

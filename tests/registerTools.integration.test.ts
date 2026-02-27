@@ -4,7 +4,12 @@ import { LogBuffer } from "../src/core/logBuffer.js";
 import { NetworkBuffer } from "../src/core/networkBuffer.js";
 import { SessionManager } from "../src/core/sessionManager.js";
 import { ToolError } from "../src/core/toolError.js";
-import { registerTools, type AdbToolAdapter, type MetroToolAdapter } from "../src/server/registerTools.js";
+import {
+  registerTools,
+  type AdbToolAdapter,
+  type IosToolAdapter,
+  type MetroToolAdapter,
+} from "../src/server/registerTools.js";
 import type { ScreenshotResult } from "../src/adapters/adb.js";
 import type { SpawnedProcess } from "../src/adapters/processRunner.js";
 import type { UiNode } from "../src/types/api.js";
@@ -235,6 +240,121 @@ class FakeMetro implements MetroToolAdapter {
   }
 }
 
+class FakeIos implements IosToolAdapter {
+  public readonly logStream = new FakeSpawnedProcess();
+  public reloadKeyboardCalls = 0;
+  public checkCalls = 0;
+  public ensureCalls = 0;
+  public deleteSessionCalls = 0;
+  public resolveCalls = 0;
+  public taps: Array<{ x: number; y: number }> = [];
+  public typed: Array<{ text: string; submit: boolean }> = [];
+  public backPresses = 0;
+  public failAvailability = false;
+
+  async checkAvailability(): Promise<void> {
+    this.checkCalls += 1;
+    if (this.failAvailability) {
+      throw new ToolError("IOS_UNAVAILABLE", "WDA unavailable");
+    }
+  }
+  async ensureWdaReady(_deviceId: string): Promise<SpawnedProcess | undefined> {
+    this.ensureCalls += 1;
+    return undefined;
+  }
+  async deleteSession(_deviceId: string): Promise<void> {
+    this.deleteSessionCalls += 1;
+  }
+  async resolveDeviceId(requested?: string): Promise<string> {
+    this.resolveCalls += 1;
+    return requested ?? "SIM-1";
+  }
+  async startLogStream(_deviceId: string, onLine: (line: string) => void): Promise<SpawnedProcess> {
+    onLine("2026-02-27 12:10:22.123 I MyApp[123:456] Loaded app");
+    onLine("2026-02-27 12:10:22.124 E MyApp[123:456] Unhandled JS Exception: boom");
+    return this.logStream;
+  }
+  async reloadViaKeyboard(): Promise<void> {
+    this.reloadKeyboardCalls += 1;
+  }
+  async tap(_deviceId: string, x: number, y: number): Promise<void> {
+    this.taps.push({ x, y });
+  }
+  async typeText(_deviceId: string, text: string, submit = false): Promise<void> {
+    this.typed.push({ text, submit });
+  }
+  async pressBack(): Promise<void> {
+    this.backPresses += 1;
+  }
+  async scroll(
+    _deviceId: string,
+    _direction: "up" | "down" | "left" | "right",
+    _distanceRatio?: number,
+    durationMs?: number,
+  ): Promise<{ from: { x: number; y: number }; to: { x: number; y: number }; durationMs: number }> {
+    return {
+      from: { x: 100, y: 600 },
+      to: { x: 300, y: 600 },
+      durationMs: durationMs ?? 350,
+    };
+  }
+  async takeScreenshot(_deviceId: string): Promise<{ png: Buffer; width?: number; height?: number }> {
+    return {
+      png: Buffer.from("iVBORw0KGgo=", "base64"),
+      width: 1,
+      height: 1,
+    };
+  }
+  async getUiTree(
+    _deviceId: string,
+    _options?: { maxDepth?: number; maxNodes?: number },
+  ): Promise<{ root?: UiNode; nodeCount: number; clickableCount: number; truncated: boolean; source: "wda" }> {
+    return {
+      root: {
+        id: "ios-node-1",
+        className: "XCUIElementTypeWindow",
+        clickable: false,
+        enabled: true,
+        focusable: false,
+        focused: false,
+        selected: false,
+        visibleToUser: true,
+        scrollable: false,
+        checkable: false,
+        checked: false,
+        bounds: { left: 0, top: 0, right: 1170, bottom: 2532, width: 1170, height: 2532 },
+        resourceId: "root",
+        children: [
+          {
+            id: "ios-node-2",
+            className: "XCUIElementTypeButton",
+            text: "Login",
+            resourceId: "login.button",
+            clickable: true,
+            enabled: true,
+            focusable: false,
+            focused: false,
+            selected: false,
+            visibleToUser: true,
+            scrollable: false,
+            checkable: false,
+            checked: false,
+            bounds: { left: 100, top: 2000, right: 1070, bottom: 2200, width: 970, height: 200 },
+            children: [],
+          },
+        ],
+      },
+      nodeCount: 2,
+      clickableCount: 1,
+      truncated: false,
+      source: "wda",
+    };
+  }
+  async getActiveAppInfo(): Promise<{ bundleId?: string; name?: string }> {
+    return { bundleId: "com.app.ios", name: "LoginScreen" };
+  }
+}
+
 function getHandler(server: FakeServer, name: string): ToolHandler {
   const handler = server.handlers.get(name);
   assert.ok(handler, `Missing handler: ${name}`);
@@ -248,6 +368,7 @@ test("registerTools connect/get logs+errors/disconnect flow", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro,
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -287,6 +408,50 @@ test("registerTools connect/get logs+errors/disconnect flow", async () => {
   assert.equal(adb.logcat.stopped, true);
 });
 
+test("registerTools supports iOS connect and reload fallback", async () => {
+  const server = new FakeServer();
+  const ios = new FakeIos();
+  const metro = new FakeMetro();
+  metro.failReload = true;
+
+  registerTools(server as unknown as never, {
+    adb: new FakeAdb(),
+    ios,
+    metro,
+    logBuffer: new LogBuffer(5000),
+    networkBuffer: new NetworkBuffer(5000),
+    sessionManager: new SessionManager(),
+  });
+
+  const connect = getHandler(server, "connect_app");
+  const reload = getHandler(server, "reload_app");
+  const getUiTree = getHandler(server, "get_ui_tree");
+  const disconnect = getHandler(server, "disconnect_app");
+
+  const connectResult = await connect({ platform: "ios" });
+  assert.equal(connectResult.isError, undefined);
+  const connectPayload = connectResult.structuredContent as Record<string, unknown>;
+  assert.equal(connectPayload.platform, "ios");
+  assert.equal(connectPayload.deviceId, "SIM-1");
+  assert.equal(ios.checkCalls, 1);
+  assert.equal(ios.resolveCalls, 1);
+  assert.equal(ios.ensureCalls, 1);
+
+  const treeResult = await getUiTree({});
+  const treePayload = treeResult.structuredContent as Record<string, unknown>;
+  assert.equal(treePayload.platform, "ios");
+  assert.equal(treePayload.source, "wda");
+
+  const reloadResult = await reload({});
+  assert.equal(reloadResult.isError, undefined);
+  const reloadPayload = reloadResult.structuredContent as { method: string };
+  assert.equal(reloadPayload.method, "ios_simulator_keyboard_fallback");
+  assert.equal(ios.reloadKeyboardCalls, 1);
+
+  await disconnect({});
+  assert.equal(ios.deleteSessionCalls, 1);
+});
+
 test("registerTools returns METRO_UNREACHABLE on connect failure", async () => {
   const server = new FakeServer();
   const adb = new FakeAdb();
@@ -295,6 +460,7 @@ test("registerTools returns METRO_UNREACHABLE on connect failure", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro,
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -319,6 +485,7 @@ test("registerTools retries transient failures during connect_app", async () => 
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro,
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -343,6 +510,7 @@ test("registerTools reload_app falls back to adb key events", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro,
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -370,6 +538,7 @@ test("registerTools retries transient metro reload failures before fallback", as
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro,
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -394,6 +563,7 @@ test("registerTools enforces NO_SESSION for session tools", async () => {
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -414,6 +584,7 @@ test("registerTools get_ui_tree returns accessibility hierarchy", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -445,6 +616,7 @@ test("registerTools get_screen_context returns activity and title context", asyn
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -470,6 +642,7 @@ test("registerTools get_test_id_remediation_plan returns deterministic guidance"
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -496,6 +669,7 @@ test("registerTools tap sends coordinate tap command", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -522,6 +696,7 @@ test("registerTools type_text sends text input with submit option", async () => 
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -548,6 +723,7 @@ test("registerTools press_back sends Android back key event", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -573,6 +749,7 @@ test("registerTools scroll performs directional swipe and returns coordinates", 
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -599,6 +776,7 @@ test("registerTools tap_element resolves node center and taps", async () => {
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -627,6 +805,7 @@ test("registerTools tap_element returns error when element is missing", async ()
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -648,6 +827,7 @@ test("registerTools get_visible_elements defaults to clickable and labeled", asy
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -685,6 +865,7 @@ test("registerTools get_visible_elements supports non-clickable and textless inc
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -766,6 +947,7 @@ test("registerTools get_visible_elements supports opt-in visibleToUser filtering
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -796,6 +978,7 @@ test("registerTools get_visible_elements filters by testId", async () => {
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -832,6 +1015,7 @@ test("registerTools get_screen_test_ids honors filters", async () => {
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -905,6 +1089,7 @@ test("registerTools get_screen_test_ids includes invisible nodes by default", as
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -933,6 +1118,7 @@ test("registerTools get_elements_by_test_id returns matching elements", async ()
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -962,6 +1148,7 @@ test("registerTools get_elements_by_test_id suggests add_test_id when missing", 
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -984,6 +1171,7 @@ test("registerTools applies levels/tags/sources filters to get_logs and get_erro
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -1027,6 +1215,7 @@ test("registerTools get_network_requests returns parsed network events with filt
 
   registerTools(server as unknown as never, {
     adb,
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -1062,6 +1251,7 @@ test("registerTools get_connection_status reflects lifecycle", async () => {
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -1095,11 +1285,60 @@ test("registerTools get_connection_status reflects lifecycle", async () => {
   assert.equal(disconnectedPayload.networkBufferSize, 0);
 });
 
+test("registerTools list/set/close session tools manage multiple sessions", async () => {
+  const server = new FakeServer();
+
+  registerTools(server as unknown as never, {
+    adb: new FakeAdb(),
+    ios: new FakeIos(),
+    metro: new FakeMetro(),
+    logBuffer: new LogBuffer(5000),
+    networkBuffer: new NetworkBuffer(5000),
+    sessionManager: new SessionManager(),
+  });
+
+  const connect = getHandler(server, "connect_app");
+  const listSessions = getHandler(server, "list_sessions");
+  const setActive = getHandler(server, "set_active_session");
+  const closeSession = getHandler(server, "close_session");
+  const status = getHandler(server, "get_connection_status");
+
+  const androidConnect = await connect({ platform: "android" });
+  const iosConnect = await connect({ platform: "ios" });
+  const androidSessionId = (androidConnect.structuredContent as Record<string, string>).sessionId;
+  const iosSessionId = (iosConnect.structuredContent as Record<string, string>).sessionId;
+  assert.ok(androidSessionId);
+  assert.ok(iosSessionId);
+  assert.notEqual(androidSessionId, iosSessionId);
+
+  const listed = await listSessions({});
+  const listedPayload = listed.structuredContent as Record<string, unknown>;
+  assert.equal(listedPayload.count, 2);
+
+  const setResult = await setActive({ sessionId: androidSessionId });
+  const setPayload = setResult.structuredContent as Record<string, unknown>;
+  assert.equal(setPayload.activeSessionId, androidSessionId);
+
+  const statusAfterSet = await status({});
+  const statusPayload = statusAfterSet.structuredContent as Record<string, unknown>;
+  assert.equal(statusPayload.activeSessionId, androidSessionId);
+
+  const closeResult = await closeSession({ sessionId: iosSessionId });
+  const closePayload = closeResult.structuredContent as Record<string, unknown>;
+  assert.equal(closePayload.closed, true);
+  assert.equal(closePayload.sessionId, iosSessionId);
+
+  const listedAfterClose = await listSessions({});
+  const listedAfterClosePayload = listedAfterClose.structuredContent as Record<string, unknown>;
+  assert.equal(listedAfterClosePayload.count, 1);
+});
+
 test("registerTools keeps active session when connect_app is called twice", async () => {
   const server = new FakeServer();
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -1113,9 +1352,10 @@ test("registerTools keeps active session when connect_app is called twice", asyn
   assert.equal(firstConnect.isError, undefined);
 
   const secondConnect = await connect({});
-  assert.equal(secondConnect.isError, true);
-  const connectError = secondConnect.structuredContent as { code: string };
-  assert.equal(connectError.code, "COMMAND_FAILED");
+  assert.equal(secondConnect.isError, undefined);
+  const secondPayload = secondConnect.structuredContent as { connected: boolean; sessionId: string };
+  assert.equal(secondPayload.connected, true);
+  assert.equal(typeof secondPayload.sessionId, "string");
 
   const logsResult = await getLogs({ sinceCursor: 0 });
   assert.equal(logsResult.isError, undefined);
@@ -1126,6 +1366,7 @@ test("registerTools output contracts stay stable", async () => {
 
   registerTools(server as unknown as never, {
     adb: new FakeAdb(),
+    ios: new FakeIos(),
     metro: new FakeMetro(),
     logBuffer: new LogBuffer(5000),
     networkBuffer: new NetworkBuffer(5000),
@@ -1158,6 +1399,8 @@ test("registerTools output contracts stay stable", async () => {
     "connected",
     "deviceId",
     "metroPort",
+    "platform",
+    "sessionId",
     "startedAt",
   ]);
 
@@ -1176,10 +1419,17 @@ test("registerTools output contracts stay stable", async () => {
   const statusResult = await getStatus({});
   const statusPayload = statusResult.structuredContent as Record<string, unknown>;
   assert.deepEqual(Object.keys(statusPayload).sort(), [
+    "activeSessionId",
+    "connectionHealth",
     "deviceId",
+    "lastDisconnectAt",
+    "lastReconnectError",
     "logBufferSize",
     "metroPort",
     "networkBufferSize",
+    "platform",
+    "reconnectAttempts",
+    "sessionId",
     "startedAt",
     "status",
   ]);
@@ -1210,6 +1460,7 @@ test("registerTools output contracts stay stable", async () => {
     "nodeCount",
     "platform",
     "root",
+    "sessionId",
     "source",
     "truncated",
   ]);
@@ -1230,6 +1481,7 @@ test("registerTools output contracts stay stable", async () => {
     "queryTestId",
     "recommendedFallback",
     "resolutionStrategy",
+    "sessionId",
     "skipVisibilityCheck",
     "source",
     "testIdMatch",
@@ -1250,6 +1502,7 @@ test("registerTools output contracts stay stable", async () => {
     "maxDepth",
     "maxNodes",
     "platform",
+    "sessionId",
     "source",
     "testIds",
     "totalCandidates",
@@ -1272,6 +1525,7 @@ test("registerTools output contracts stay stable", async () => {
     "queryTestId",
     "recommendedFallback",
     "resolutionStrategy",
+    "sessionId",
     "skipVisibilityCheck",
     "source",
     "testIdMatch",
@@ -1294,19 +1548,27 @@ test("registerTools output contracts stay stable", async () => {
 
   const tapResult = await tap({ x: 10, y: 20 });
   const tapPayload = tapResult.structuredContent as Record<string, unknown>;
-  assert.deepEqual(Object.keys(tapPayload).sort(), ["deviceId", "method", "tapped", "x", "y"]);
+  assert.deepEqual(Object.keys(tapPayload).sort(), ["deviceId", "method", "sessionId", "tapped", "x", "y"]);
 
   const typeTextResult = await typeText({ text: "hello", submit: true });
   const typeTextPayload = typeTextResult.structuredContent as Record<string, unknown>;
-  assert.deepEqual(Object.keys(typeTextPayload).sort(), ["deviceId", "submitted", "textLength", "typed"]);
+  assert.deepEqual(Object.keys(typeTextPayload).sort(), ["deviceId", "sessionId", "submitted", "textLength", "typed"]);
 
   const pressBackResult = await pressBack({});
   const pressBackPayload = pressBackResult.structuredContent as Record<string, unknown>;
-  assert.deepEqual(Object.keys(pressBackPayload).sort(), ["deviceId", "key", "pressed"]);
+  assert.deepEqual(Object.keys(pressBackPayload).sort(), ["deviceId", "key", "pressed", "sessionId"]);
 
   const scrollResult = await scroll({ direction: "down" });
   const scrollPayload = scrollResult.structuredContent as Record<string, unknown>;
-  assert.deepEqual(Object.keys(scrollPayload).sort(), ["deviceId", "direction", "durationMs", "from", "scrolled", "to"]);
+  assert.deepEqual(Object.keys(scrollPayload).sort(), [
+    "deviceId",
+    "direction",
+    "durationMs",
+    "from",
+    "scrolled",
+    "sessionId",
+    "to",
+  ]);
 
   const tapElementResult = await tapElement({ elementId: "node-2" });
   const tapElementPayload = tapElementResult.structuredContent as Record<string, unknown>;
@@ -1314,6 +1576,7 @@ test("registerTools output contracts stay stable", async () => {
     "deviceId",
     "elementId",
     "method",
+    "sessionId",
     "tapped",
     "x",
     "y",
@@ -1335,6 +1598,7 @@ test("registerTools output contracts stay stable", async () => {
     "deviceId",
     "height",
     "mimeType",
+    "sessionId",
     "tempPath",
     "width",
   ]);
@@ -1342,5 +1606,5 @@ test("registerTools output contracts stay stable", async () => {
 
   const disconnectResult = await disconnect({});
   const disconnectPayload = disconnectResult.structuredContent as Record<string, unknown>;
-  assert.deepEqual(Object.keys(disconnectPayload).sort(), ["disconnected"]);
+  assert.deepEqual(Object.keys(disconnectPayload).sort(), ["disconnected", "sessionId"]);
 });

@@ -62,4 +62,8 @@ export class NetworkBuffer {
   size(): number {
     return this.entries.length;
   }
+
+  capacity(): number {
+    return this.maxEntries;
+  }
 }

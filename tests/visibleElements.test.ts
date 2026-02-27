@@ -108,6 +108,24 @@ test("extractVisibleElements filters by testId exact and contains", () => {
   assert.equal(contains.elements[0].testId, "save_button");
 });
 
+test("extractVisibleElements prefers explicit node.testId over resourceId tail", () => {
+  const tree = makeTree();
+  tree.children[0].testId = "checkout.submit.button";
+  tree.children[0].resourceId = "com.app:id/submit_button_android";
+
+  const result = extractVisibleElements(tree, {
+    limit: 10,
+    clickableOnly: true,
+    includeTextless: false,
+    skipVisibilityCheck: true,
+    testIdMatch: "exact",
+    testId: "checkout.submit.button",
+  });
+
+  assert.equal(result.totalCandidates, 1);
+  assert.equal(result.elements[0].testId, "checkout.submit.button");
+});
+
 test("extractVisibleElements can enforce visibleToUser filter when requested", () => {
   const result = extractVisibleElements(makeTree(), {
     limit: 50,

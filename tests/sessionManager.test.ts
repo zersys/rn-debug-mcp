@@ -33,3 +33,19 @@ test("SessionManager requireConnected and reset behavior", async () => {
     return error instanceof ToolError && error.code === "NO_SESSION";
   });
 });
+
+test("SessionManager supports multiple sessions and active selection", async () => {
+  const session = new SessionManager();
+  const a = session.createSession("android", "emulator-5554", 8081);
+  const b = session.createSession("ios", "SIM-1", 8081);
+
+  assert.equal(session.listSessions().length, 2);
+  assert.equal(session.requireConnected().sessionId, b.sessionId);
+
+  session.setActiveSession(a.sessionId);
+  assert.equal(session.requireConnected().sessionId, a.sessionId);
+
+  await session.closeSession(a.sessionId);
+  assert.equal(session.listSessions().length, 1);
+  assert.equal(session.requireConnected().sessionId, b.sessionId);
+});

@@ -7,14 +7,17 @@ export const DEFAULT_LOG_BUFFER_SIZE = 5000;
 export const DEFAULT_NETWORK_LIMIT = 200;
 export const MAX_NETWORK_LIMIT = 1000;
 export const DEFAULT_NETWORK_BUFFER_SIZE = 5000;
+export const DEFAULT_IOS_WDA_BASE_URL = "http://127.0.0.1:8100";
 
 export type ErrorCode =
   | "NO_SESSION"
   | "ADB_UNAVAILABLE"
+  | "IOS_UNAVAILABLE"
   | "DEVICE_NOT_FOUND"
   | "METRO_UNREACHABLE"
   | "COMMAND_FAILED";
 
+export type Platform = "android" | "ios";
 export type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
 export type LogSource = "logcat" | "metro";
 export type NetworkPhase = "request" | "response" | "error";
@@ -26,6 +29,7 @@ export type ScrollDirection = "up" | "down" | "left" | "right";
 export const LOG_LEVEL_VALUES = ["debug", "info", "warn", "error", "fatal"] as const;
 export const LOG_SOURCE_VALUES = ["logcat", "metro"] as const;
 export const NETWORK_PHASE_VALUES = ["request", "response", "error"] as const;
+export const PLATFORM_VALUES = ["android", "ios"] as const;
 export const TEST_ID_MATCH_VALUES = ["exact", "contains"] as const;
 export const RESOLUTION_STRATEGY_VALUES = ["test_id_exact", "test_id_contains", "none"] as const;
 export const RECOMMENDED_FALLBACK_VALUES = ["tap_element", "tap_coordinates", "add_test_id"] as const;
@@ -44,9 +48,24 @@ export interface LogEntry {
 
 export interface SessionState {
   status: "disconnected" | "connecting" | "connected";
+  sessionId?: string;
+  platform?: Platform;
   deviceId?: string;
   metroPort?: number;
   startedAt?: string;
+}
+
+export interface SessionSummary extends Record<string, unknown> {
+  sessionId: string;
+  platform: Platform;
+  status: "connected";
+  deviceId: string;
+  metroPort: number;
+  startedAt: string;
+  connectionHealth: "healthy" | "degraded" | "reconnecting";
+  reconnectAttempts: number;
+  lastDisconnectAt?: string;
+  lastReconnectError?: string;
 }
 
 export interface ToolErrorData extends Record<string, unknown> {
@@ -56,37 +75,53 @@ export interface ToolErrorData extends Record<string, unknown> {
 }
 
 export interface ConnectAppInput {
+  platform?: Platform;
   deviceId?: string;
   metroPort?: number;
 }
 
 export interface ConnectAppOutput extends Record<string, unknown> {
   connected: true;
+  sessionId: string;
+  platform: Platform;
   deviceId: string;
   metroPort: number;
   startedAt: string;
   capabilities: string[];
 }
 
+export interface SessionScopedInput {
+  sessionId?: string;
+}
+
 export interface DisconnectAppOutput extends Record<string, unknown> {
   disconnected: true;
+  sessionId?: string;
 }
 
 export interface ConnectionStatusOutput extends Record<string, unknown> {
   status: SessionState["status"];
+  activeSessionId?: string;
+  platform?: Platform;
+  sessionId?: string;
   deviceId?: string;
   metroPort?: number;
   startedAt?: string;
   logBufferSize: number;
   networkBufferSize: number;
+  connectionHealth?: "healthy" | "degraded" | "reconnecting";
+  reconnectAttempts?: number;
+  lastDisconnectAt?: string;
+  lastReconnectError?: string;
 }
 
 export interface ReloadAppOutput extends Record<string, unknown> {
   reloaded: true;
-  method: "metro" | "adb_fallback";
+  method: "metro" | "adb_fallback" | "ios_simulator_keyboard_fallback";
+  sessionId?: string;
 }
 
-export interface GetLogsInput {
+export interface GetLogsInput extends SessionScopedInput {
   sinceCursor?: number;
   limit?: number;
   levels?: LogLevel[];
@@ -114,7 +149,7 @@ export interface NetworkRequestEntry {
   raw?: string;
 }
 
-export interface GetNetworkRequestsInput {
+export interface GetNetworkRequestsInput extends SessionScopedInput {
   sinceCursor?: number;
   limit?: number;
   phases?: NetworkPhase[];
@@ -133,6 +168,7 @@ export interface ScreenshotOutput extends Record<string, unknown> {
   mimeType: "image/png";
   width?: number;
   height?: number;
+  sessionId?: string;
   deviceId: string;
   capturedAt: string;
   tempPath: string;
@@ -150,6 +186,7 @@ export interface UiBounds extends Record<string, unknown> {
 
 export interface UiNode extends Record<string, unknown> {
   id: string;
+  testId?: string;
   className?: string;
   resourceId?: string;
   packageName?: string;
@@ -168,22 +205,22 @@ export interface UiNode extends Record<string, unknown> {
   children: UiNode[];
 }
 
-export interface GetUiTreeInput {
+export interface GetUiTreeInput extends SessionScopedInput {
   maxDepth?: number;
   maxNodes?: number;
 }
 
-export interface TapInput {
+export interface TapInput extends SessionScopedInput {
   x: number;
   y: number;
 }
 
-export interface TypeTextInput {
+export interface TypeTextInput extends SessionScopedInput {
   text: string;
   submit?: boolean;
 }
 
-export interface ScrollInput {
+export interface ScrollInput extends SessionScopedInput {
   direction: ScrollDirection;
   distanceRatio?: number;
   durationMs?: number;
@@ -219,8 +256,9 @@ export interface VisibleElement extends Record<string, unknown> {
 }
 
 export interface UiTreeOutput extends Record<string, unknown> {
-  platform: "android";
-  source: "uiautomator";
+  platform: Platform;
+  source: "uiautomator" | "wda";
+  sessionId?: string;
   deviceId: string;
   capturedAt: string;
   nodeCount: number;
@@ -232,8 +270,9 @@ export interface UiTreeOutput extends Record<string, unknown> {
 }
 
 export interface VisibleElementsOutput extends Record<string, unknown> {
-  platform: "android";
-  source: "uiautomator";
+  platform: Platform;
+  source: "uiautomator" | "wda";
+  sessionId?: string;
   deviceId: string;
   capturedAt: string;
   totalCandidates: number;
@@ -252,7 +291,7 @@ export interface VisibleElementsOutput extends Record<string, unknown> {
   elements: VisibleElement[];
 }
 
-export interface GetElementsByTestIdInput extends GetUiTreeInput {
+export interface GetElementsByTestIdInput extends GetUiTreeInput, SessionScopedInput {
   testId: string;
   limit?: number;
   clickableOnly?: boolean;
@@ -261,15 +300,16 @@ export interface GetElementsByTestIdInput extends GetUiTreeInput {
   testIdMatch?: TestIdMatch;
 }
 
-export interface GetScreenTestIdsInput extends GetUiTreeInput {
+export interface GetScreenTestIdsInput extends GetUiTreeInput, SessionScopedInput {
   limit?: number;
   includeNonClickable?: boolean;
   includeInvisible?: boolean;
 }
 
 export interface ScreenTestIdsOutput extends Record<string, unknown> {
-  platform: "android";
-  source: "uiautomator";
+  platform: Platform;
+  source: "uiautomator" | "wda";
+  sessionId?: string;
   deviceId: string;
   capturedAt: string;
   maxDepth?: number;
@@ -287,6 +327,7 @@ export interface ScreenTestIdsOutput extends Record<string, unknown> {
 export interface TapOutput extends Record<string, unknown> {
   tapped: true;
   method: "coordinates" | "element";
+  sessionId?: string;
   deviceId: string;
   x: number;
   y: number;
@@ -295,6 +336,7 @@ export interface TapOutput extends Record<string, unknown> {
 
 export interface TypeTextOutput extends Record<string, unknown> {
   typed: true;
+  sessionId?: string;
   deviceId: string;
   textLength: number;
   submitted: boolean;
@@ -303,12 +345,14 @@ export interface TypeTextOutput extends Record<string, unknown> {
 export interface PressBackOutput extends Record<string, unknown> {
   pressed: true;
   key: "back";
+  sessionId?: string;
   deviceId: string;
 }
 
 export interface ScrollOutput extends Record<string, unknown> {
   scrolled: true;
   direction: ScrollDirection;
+  sessionId?: string;
   deviceId: string;
   from: { x: number; y: number };
   to: { x: number; y: number };
@@ -316,7 +360,8 @@ export interface ScrollOutput extends Record<string, unknown> {
 }
 
 export interface ScreenContextOutput extends Record<string, unknown> {
-  platform: "android";
+  platform: Platform;
+  sessionId?: string;
   deviceId: string;
   capturedAt: string;
   activity?: string;
@@ -328,7 +373,7 @@ export interface ScreenContextOutput extends Record<string, unknown> {
   confidence: ScreenConfidence;
 }
 
-export interface GetTestIdRemediationPlanInput {
+export interface GetTestIdRemediationPlanInput extends SessionScopedInput {
   desiredAction: string;
   desiredTestId?: string;
   matchMode?: TestIdMatch;
@@ -356,17 +401,52 @@ export interface TestIdRemediationPlanOutput extends Record<string, unknown> {
   nextSteps: RemediationStep[];
 }
 
+export interface ListSessionsInput extends Record<string, never> {}
+
+export interface ListSessionsOutput extends Record<string, unknown> {
+  activeSessionId?: string;
+  count: number;
+  sessions: SessionSummary[];
+}
+
+export interface SetActiveSessionInput {
+  sessionId: string;
+}
+
+export interface SetActiveSessionOutput extends Record<string, unknown> {
+  activeSessionId: string;
+}
+
+export interface CloseSessionInput {
+  sessionId: string;
+}
+
+export interface CloseSessionOutput extends Record<string, unknown> {
+  closed: true;
+  sessionId: string;
+}
+
 export const connectAppInputSchema = z.object({
+  platform: z.enum(PLATFORM_VALUES).optional(),
   deviceId: z.string().min(1).optional(),
   metroPort: z.number().int().positive().optional(),
 });
 
-export const disconnectAppInputSchema = z.object({});
-export const connectionStatusInputSchema = z.object({});
-export const getScreenContextInputSchema = z.object({});
-export const reloadAppInputSchema = z.object({});
+export const disconnectAppInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+});
+export const connectionStatusInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+});
+export const getScreenContextInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+});
+export const reloadAppInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+});
 
 export const getLogsInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   sinceCursor: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().max(MAX_LOG_LIMIT).optional(),
   levels: z.array(z.enum(LOG_LEVEL_VALUES)).min(1).optional(),
@@ -375,6 +455,7 @@ export const getLogsInputSchema = z.object({
 });
 
 export const getNetworkRequestsInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   sinceCursor: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().max(MAX_NETWORK_LIMIT).optional(),
   phases: z.array(z.enum(NETWORK_PHASE_VALUES)).min(1).optional(),
@@ -384,14 +465,18 @@ export const getNetworkRequestsInputSchema = z.object({
   sources: z.array(z.enum(LOG_SOURCE_VALUES)).min(1).optional(),
 });
 
-export const takeScreenshotInputSchema = z.object({});
+export const takeScreenshotInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+});
 
 export const getUiTreeInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   maxDepth: z.number().int().nonnegative().max(50).optional(),
   maxNodes: z.number().int().positive().max(5000).optional(),
 });
 
 export const getVisibleElementsInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   maxDepth: z.number().int().nonnegative().max(50).optional(),
   maxNodes: z.number().int().positive().max(5000).optional(),
   limit: z.number().int().positive().max(2000).optional(),
@@ -403,6 +488,7 @@ export const getVisibleElementsInputSchema = z.object({
 });
 
 export const getElementsByTestIdInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   testId: z.string().min(1),
   maxDepth: z.number().int().nonnegative().max(50).optional(),
   maxNodes: z.number().int().positive().max(5000).optional(),
@@ -414,6 +500,7 @@ export const getElementsByTestIdInputSchema = z.object({
 });
 
 export const getScreenTestIdsInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   maxDepth: z.number().int().nonnegative().max(50).optional(),
   maxNodes: z.number().int().positive().max(5000).optional(),
   limit: z.number().int().positive().max(2000).optional(),
@@ -422,31 +509,48 @@ export const getScreenTestIdsInputSchema = z.object({
 });
 
 export const tapInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   x: z.number().int().nonnegative(),
   y: z.number().int().nonnegative(),
 });
 
 export const typeTextInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   text: z.string().min(1),
   submit: z.boolean().optional(),
 });
 
-export const pressBackInputSchema = z.object({});
+export const pressBackInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+});
 
 export const scrollInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   direction: z.enum(SCROLL_DIRECTION_VALUES),
   distanceRatio: z.number().positive().max(1).optional(),
   durationMs: z.number().int().positive().max(5000).optional(),
 });
 
 export const tapElementInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   elementId: z.string().min(1),
   maxDepth: z.number().int().nonnegative().max(50).optional(),
   maxNodes: z.number().int().positive().max(5000).optional(),
 });
 
 export const getTestIdRemediationPlanInputSchema = z.object({
+  sessionId: z.string().min(1).optional(),
   desiredAction: z.string().min(1),
   desiredTestId: z.string().min(1).optional(),
   matchMode: z.enum(TEST_ID_MATCH_VALUES).optional(),
+});
+
+export const listSessionsInputSchema = z.object({});
+
+export const setActiveSessionInputSchema = z.object({
+  sessionId: z.string().min(1),
+});
+
+export const closeSessionInputSchema = z.object({
+  sessionId: z.string().min(1),
 });

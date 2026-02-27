@@ -1,13 +1,31 @@
-# Agent Interaction Flow (Android)
+# Agent Interaction Flow (Android + iOS)
 
 This document defines the default runtime policy for Claude/Codex style agents using RN Debug Bridge MCP.
+
+## Session setup
+
+1. Connect:
+
+```json
+{ "tool": "connect_app", "arguments": { "platform": "android" } }
+```
+
+or
+
+```json
+{ "tool": "connect_app", "arguments": { "platform": "ios" } }
+```
+
+2. If multiple sessions are active, either:
+- pass `sessionId` on all subsequent tool calls, or
+- call `set_active_session({ sessionId })` once.
 
 ## Policy: testID-first
 
 1. Try exact testID lookup:
 
 ```json
-{ "tool": "get_elements_by_test_id", "arguments": { "testId": "checkout.submit.button", "testIdMatch": "exact" } }
+{ "tool": "get_elements_by_test_id", "arguments": { "sessionId": "<sessionId>", "testId": "checkout.submit.button", "testIdMatch": "exact" } }
 ```
 
 Note: element lookup skips `visibleToUser` filtering by default. For strict native visibility filtering, pass `skipVisibilityCheck: false`.
@@ -15,28 +33,28 @@ Note: element lookup skips `visibleToUser` filtering by default. For strict nati
 2. If no results, try contains lookup:
 
 ```json
-{ "tool": "get_elements_by_test_id", "arguments": { "testId": "submit", "testIdMatch": "contains" } }
+{ "tool": "get_elements_by_test_id", "arguments": { "sessionId": "<sessionId>", "testId": "submit", "testIdMatch": "contains" } }
 ```
 
 2a. If testIDs are unknown, discover first:
 
 ```json
-{ \"tool\": \"get_screen_test_ids\", \"arguments\": {} }
+{ \"tool\": \"get_screen_test_ids\", \"arguments\": { \"sessionId\": \"<sessionId>\" } }
 ```
 
 3. If still no results, remediate:
 
-- `get_screen_context({})`
-- `get_test_id_remediation_plan({ desiredAction, desiredTestId?, matchMode? })`
+- `get_screen_context({ sessionId })`
+- `get_test_id_remediation_plan({ sessionId, desiredAction, desiredTestId?, matchMode? })`
 - patch source with suggested testID
-- `reload_app({})`
+- `reload_app({ sessionId })`
 - re-run exact lookup
 
 4. If unresolved after remediation attempts:
 
-- fallback to `tap_element({ elementId })`
-- final fallback: `tap({ x, y })`
-- for navigation/input flows: `scroll({ direction })`, `press_back({})`, `type_text({ text, submit? })`
+- fallback to `tap_element({ sessionId, elementId })`
+- final fallback: `tap({ sessionId, x, y })`
+- for navigation/input flows: `scroll({ sessionId, direction })`, `press_back({ sessionId })`, `type_text({ sessionId, text, submit? })`
 
 ## Remediation attempt budget
 
