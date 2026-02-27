@@ -45,16 +45,18 @@ A TypeScript MCP server that gives AI agents a unified React Native debugging lo
 - UI hierarchy extraction:
   - Android via `uiautomator dump`
   - iOS via WDA source (`source: "wda"`)
-- Flattened visible/actionable element extraction for planning (`get_visible_elements`).
+- Flattened visible element extraction for planning (`get_visible_elements`).
 - testID-aware element lookup (`get_elements_by_test_id`) using `resource-id` tail matching.
 - screen-wide testID discovery (`get_screen_test_ids`) to let agents discover available IDs before lookup.
 - Visibility filtering is off by default for element lookup (`skipVisibilityCheck: true`) to work better with React Native accessibility trees; set `skipVisibilityCheck: false` to enforce `visibleToUser`.
+- Clickability filtering is off by default (`clickableOnly: false`) so iOS/RN tappable elements with missing clickable flags are still discoverable; set `clickableOnly: true` for strict actionable-only matching.
 - `get_screen_test_ids` defaults to `includeInvisible: true` for React Native compatibility; set `includeInvisible: false` for strict visible-only discovery.
 - Screen context inference (`get_screen_context`) from activity/window dumps + UI titles.
 - Guided testID remediation plans (`get_test_id_remediation_plan`) for Claude/Codex patch loops.
 - Direct interaction without screenshots via coordinate tap and element-id tap (`tap`, `tap_element`) on both platforms.
+- `tap` coordinate contract: Android expects pixels; iOS expects points (WDA coordinate space).
 - Keyboard/navigation gestures for flows (`type_text`, `press_back`, `scroll`).
-- Screenshot output as MCP `image` content block, and the PNG is also saved to OS temp path (returned as `tempPath`).
+- Screenshot output includes pixel and point metrics (`width/height`, `pointWidth/pointHeight`, `scaleFactor`) as MCP `image` content, and the PNG is also saved to OS temp path (`tempPath`).
 
 ## Recommended Agent Flow (TestID-first)
 
@@ -70,6 +72,8 @@ A TypeScript MCP server that gives AI agents a unified React Native debugging lo
 5. If unresolved:
    - `tap_element` from visible candidates
    - final fallback: `tap({ x, y })`
+     - iOS note: pass point coordinates. If using screenshot pixels, convert first:
+       `pointX = round(pixelX / scaleFactor)`, `pointY = round(pixelY / scaleFactor)`
    - if navigation/input is needed: `scroll`, `press_back`, `type_text`
 
 testID naming convention: `screen.element.action` (example: `checkout.submit.button`).

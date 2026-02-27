@@ -247,6 +247,8 @@ class FakeIos implements IosToolAdapter {
   public ensureCalls = 0;
   public deleteSessionCalls = 0;
   public resolveCalls = 0;
+  public viewportSize = { width: 390, height: 844 };
+  public failViewport = false;
   public taps: Array<{ x: number; y: number }> = [];
   public typed: Array<{ text: string; submit: boolean }> = [];
   public backPresses = 0;
@@ -280,6 +282,12 @@ class FakeIos implements IosToolAdapter {
   async tap(_deviceId: string, x: number, y: number): Promise<void> {
     this.taps.push({ x, y });
   }
+  async getViewportSize(_deviceId: string): Promise<{ width: number; height: number }> {
+    if (this.failViewport) {
+      throw new ToolError("COMMAND_FAILED", "viewport unavailable");
+    }
+    return this.viewportSize;
+  }
   async typeText(_deviceId: string, text: string, submit = false): Promise<void> {
     this.typed.push({ text, submit });
   }
@@ -301,8 +309,8 @@ class FakeIos implements IosToolAdapter {
   async takeScreenshot(_deviceId: string): Promise<{ png: Buffer; width?: number; height?: number }> {
     return {
       png: Buffer.from("iVBORw0KGgo=", "base64"),
-      width: 1,
-      height: 1,
+      width: 1170,
+      height: 2532,
     };
   }
   async getUiTree(
@@ -450,6 +458,63 @@ test("registerTools supports iOS connect and reload fallback", async () => {
 
   await disconnect({});
   assert.equal(ios.deleteSessionCalls, 1);
+});
+
+test("registerTools take_screenshot includes iOS point metrics", async () => {
+  const server = new FakeServer();
+  const ios = new FakeIos();
+
+  registerTools(server as unknown as never, {
+    adb: new FakeAdb(),
+    ios,
+    metro: new FakeMetro(),
+    logBuffer: new LogBuffer(5000),
+    networkBuffer: new NetworkBuffer(5000),
+    sessionManager: new SessionManager(),
+  });
+
+  const connect = getHandler(server, "connect_app");
+  const screenshot = getHandler(server, "take_screenshot");
+
+  await connect({ platform: "ios" });
+  const result = await screenshot({});
+  assert.equal(result.isError, undefined);
+
+  const payload = result.structuredContent as Record<string, unknown>;
+  assert.equal(payload.width, 1170);
+  assert.equal(payload.height, 2532);
+  assert.equal(payload.pointWidth, 390);
+  assert.equal(payload.pointHeight, 844);
+  assert.equal(payload.scaleFactor, 3);
+});
+
+test("registerTools take_screenshot falls back to pixel metrics when iOS viewport lookup fails", async () => {
+  const server = new FakeServer();
+  const ios = new FakeIos();
+  ios.failViewport = true;
+
+  registerTools(server as unknown as never, {
+    adb: new FakeAdb(),
+    ios,
+    metro: new FakeMetro(),
+    logBuffer: new LogBuffer(5000),
+    networkBuffer: new NetworkBuffer(5000),
+    sessionManager: new SessionManager(),
+  });
+
+  const connect = getHandler(server, "connect_app");
+  const screenshot = getHandler(server, "take_screenshot");
+
+  await connect({ platform: "ios" });
+  const result = await screenshot({});
+  assert.equal(result.isError, undefined);
+
+  const payload = result.structuredContent as Record<string, unknown>;
+  assert.equal(payload.width, 1170);
+  assert.equal(payload.height, 2532);
+  assert.equal(payload.pointWidth, 1170);
+  assert.equal(payload.pointHeight, 2532);
+  assert.equal(payload.scaleFactor, 1);
 });
 
 test("registerTools returns METRO_UNREACHABLE on connect failure", async () => {
@@ -686,6 +751,7 @@ test("registerTools tap sends coordinate tap command", async () => {
 
   const payload = result.structuredContent as Record<string, unknown>;
   assert.equal(payload.method, "coordinates");
+  assert.equal(payload.coordinateSpace, "pixels");
   assert.equal(payload.x, 123);
   assert.equal(payload.y, 456);
 });
@@ -822,7 +888,7 @@ test("registerTools tap_element returns error when element is missing", async ()
   assert.equal(payload.code, "COMMAND_FAILED");
 });
 
-test("registerTools get_visible_elements defaults to clickable and labeled", async () => {
+test("registerTools get_visible_elements defaults to non-clickable-inclusive and labeled", async () => {
   const server = new FakeServer();
 
   registerTools(server as unknown as never, {
@@ -845,19 +911,21 @@ test("registerTools get_visible_elements defaults to clickable and labeled", asy
   const payload = result.structuredContent as Record<string, unknown>;
   assert.equal(payload.platform, "android");
   assert.equal(payload.source, "uiautomator");
-  assert.equal(payload.count, 1);
-  assert.equal(payload.totalCandidates, 1);
-  assert.equal(payload.clickableOnly, true);
+  assert.equal(payload.count, 2);
+  assert.equal(payload.totalCandidates, 2);
+  assert.equal(payload.clickableOnly, false);
   assert.equal(payload.includeTextless, false);
   assert.equal(payload.skipVisibilityCheck, true);
   assert.equal(payload.resolutionStrategy, "none");
   assert.equal(payload.recommendedFallback, "tap_element");
 
   const elements = payload.elements as Array<Record<string, unknown>>;
-  assert.equal(elements.length, 1);
-  assert.equal(elements[0].id, "node-2");
-  assert.equal(elements[0].label, "Save");
-  assert.equal(elements[0].testId, "save_button");
+  assert.equal(elements.length, 2);
+  assert.equal(elements.some((item) => item.id === "node-2"), true);
+  assert.equal(elements.some((item) => item.id === "node-1"), true);
+  const saveButton = elements.find((item) => item.id === "node-2") as Record<string, unknown>;
+  assert.equal(saveButton.label, "Save");
+  assert.equal(saveButton.testId, "save_button");
 });
 
 test("registerTools get_visible_elements supports non-clickable and textless inclusion", async () => {
@@ -1548,7 +1616,7 @@ test("registerTools output contracts stay stable", async () => {
 
   const tapResult = await tap({ x: 10, y: 20 });
   const tapPayload = tapResult.structuredContent as Record<string, unknown>;
-  assert.deepEqual(Object.keys(tapPayload).sort(), ["deviceId", "method", "sessionId", "tapped", "x", "y"]);
+  assert.deepEqual(Object.keys(tapPayload).sort(), ["coordinateSpace", "deviceId", "method", "sessionId", "tapped", "x", "y"]);
 
   const typeTextResult = await typeText({ text: "hello", submit: true });
   const typeTextPayload = typeTextResult.structuredContent as Record<string, unknown>;
@@ -1573,6 +1641,7 @@ test("registerTools output contracts stay stable", async () => {
   const tapElementResult = await tapElement({ elementId: "node-2" });
   const tapElementPayload = tapElementResult.structuredContent as Record<string, unknown>;
   assert.deepEqual(Object.keys(tapElementPayload).sort(), [
+    "coordinateSpace",
     "deviceId",
     "elementId",
     "method",
@@ -1598,6 +1667,9 @@ test("registerTools output contracts stay stable", async () => {
     "deviceId",
     "height",
     "mimeType",
+    "pointHeight",
+    "pointWidth",
+    "scaleFactor",
     "sessionId",
     "tempPath",
     "width",

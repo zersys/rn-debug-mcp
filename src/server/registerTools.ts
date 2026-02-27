@@ -135,6 +135,7 @@ export interface IosToolAdapter {
   startLogStream(deviceId: string, onLine: (line: string) => void): Promise<SpawnedProcess>;
   reloadViaKeyboard(): Promise<void>;
   tap(deviceId: string, x: number, y: number): Promise<void>;
+  getViewportSize(deviceId: string): Promise<{ width: number; height: number }>;
   typeText(deviceId: string, text: string, submit?: boolean): Promise<void>;
   pressBack(deviceId: string): Promise<void>;
   scroll(
@@ -400,7 +401,7 @@ function resolveVisibleOptions(input: GetVisibleElementsInput): {
     maxDepth: input.maxDepth ?? DEFAULT_UI_TREE_MAX_DEPTH,
     maxNodes: input.maxNodes ?? DEFAULT_UI_TREE_MAX_NODES,
     limit: input.limit ?? DEFAULT_VISIBLE_ELEMENTS_LIMIT,
-    clickableOnly: input.clickableOnly ?? true,
+    clickableOnly: input.clickableOnly ?? false,
     includeTextless: input.includeTextless ?? false,
     skipVisibilityCheck: input.skipVisibilityCheck ?? true,
     testId: input.testId,
@@ -1177,6 +1178,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const payload: TapOutput = {
           tapped: true,
           method: "coordinates",
+          coordinateSpace: session.platform === "ios" ? "points" : "pixels",
           sessionId: session.sessionId,
           deviceId: session.deviceId,
           x: input.x,
@@ -1308,6 +1310,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const payload: TapOutput = {
           tapped: true,
           method: "element",
+          coordinateSpace: session.platform === "ios" ? "points" : "pixels",
           sessionId: session.sessionId,
           deviceId: session.deviceId,
           x: point.x,
@@ -1333,10 +1336,38 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const tempPath = join(tmpdir(), `rndb-screenshot-${Date.now()}-${randomUUID()}.png`);
         await writeFile(tempPath, screenshot.png);
 
+        const pixelWidth = screenshot.width;
+        const pixelHeight = screenshot.height;
+
+        let pointWidth = pixelWidth;
+        let pointHeight = pixelHeight;
+        let scaleFactor = 1;
+
+        if (session.platform === "ios") {
+          try {
+            const viewport = await ios.getViewportSize(session.deviceId);
+            pointWidth = viewport.width;
+            pointHeight = viewport.height;
+            if (typeof pixelWidth === "number" && pixelWidth > 0 && viewport.width > 0) {
+              const computedScale = pixelWidth / viewport.width;
+              if (Number.isFinite(computedScale) && computedScale > 0) {
+                scaleFactor = computedScale;
+              }
+            }
+          } catch {
+            pointWidth = pixelWidth;
+            pointHeight = pixelHeight;
+            scaleFactor = 1;
+          }
+        }
+
         const payload: ScreenshotOutput = {
           mimeType: "image/png",
-          width: screenshot.width,
-          height: screenshot.height,
+          width: pixelWidth,
+          height: pixelHeight,
+          pointWidth,
+          pointHeight,
+          scaleFactor,
           sessionId: session.sessionId,
           deviceId: session.deviceId,
           capturedAt: new Date().toISOString(),

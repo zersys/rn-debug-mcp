@@ -29,6 +29,7 @@ or
 ```
 
 Note: element lookup skips `visibleToUser` filtering by default. For strict native visibility filtering, pass `skipVisibilityCheck: false`.
+Note: element lookup includes non-clickable nodes by default. For actionable-only matches, pass `clickableOnly: true`.
 
 2. If no results, try contains lookup:
 
@@ -54,6 +55,9 @@ Note: element lookup skips `visibleToUser` filtering by default. For strict nati
 
 - fallback to `tap_element({ sessionId, elementId })`
 - final fallback: `tap({ sessionId, x, y })`
+  - iOS uses point coordinates. If you started from screenshot pixels, convert with screenshot `scaleFactor`:
+    - `pointX = round(pixelX / scaleFactor)`
+    - `pointY = round(pixelY / scaleFactor)`
 - for navigation/input flows: `scroll({ sessionId, direction })`, `press_back({ sessionId })`, `type_text({ sessionId, text, submit? })`
 
 ## Remediation attempt budget

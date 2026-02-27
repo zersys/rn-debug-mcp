@@ -104,19 +104,38 @@ test("WdaClient recreates session and retries when W3C reports invalid session",
   assert.equal(calls.some((call) => call.url.endsWith("/session/S2/actions")), true);
 });
 
-test("WdaClient typeText retries keys payload with value[] when text payload is rejected", async (t) => {
+test("WdaClient typeText uses W3C key actions when available", async (t) => {
   const calls = withFetchQueue(t, [
     () => jsonResponse(200, { value: { sessionId: "S1", capabilities: {} } }),
-    () => jsonResponse(400, { value: { error: "invalid argument", message: "text not supported" } }),
     () => jsonResponse(200, { value: null }),
   ]);
 
   const client = new WdaClient("http://127.0.0.1:8100");
   await client.typeText("SIM-1", "hello");
 
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url.endsWith("/session/S1/actions"), true);
+  const body = calls[1].body as { actions?: Array<{ type?: string; actions?: Array<{ type?: string; value?: string }> }> };
+  assert.equal(body.actions?.[0]?.type, "key");
+  assert.equal(body.actions?.[0]?.actions?.length, 10);
+  assert.deepEqual(body.actions?.[0]?.actions?.slice(0, 2), [
+    { type: "keyDown", value: "h" },
+    { type: "keyUp", value: "h" },
+  ]);
+});
+
+test("WdaClient typeText falls back to legacy /wda/keys when W3C actions are unavailable", async (t) => {
+  const calls = withFetchQueue(t, [
+    () => jsonResponse(200, { value: { sessionId: "S1", capabilities: {} } }),
+    () => jsonResponse(404, { value: { error: "unknown command", message: "Unhandled endpoint" } }),
+    () => jsonResponse(200, { value: null }),
+  ]);
+
+  const client = new WdaClient("http://127.0.0.1:8100");
+  await client.typeText("SIM-1", "ok");
+
   assert.equal(calls.length, 3);
-  assert.equal(calls[1].url.endsWith("/session/S1/keys"), true);
-  assert.deepEqual(calls[1].body, { text: "hello" });
-  assert.equal(calls[2].url.endsWith("/session/S1/keys"), true);
-  assert.deepEqual(calls[2].body, { value: ["h", "e", "l", "l", "o"] });
+  assert.equal(calls[1].url.endsWith("/session/S1/actions"), true);
+  assert.equal(calls[2].url.endsWith("/wda/keys"), true);
+  assert.deepEqual(calls[2].body, { value: ["o", "k"] });
 });

@@ -101,18 +101,13 @@ function isInvalidSessionError(error: unknown): boolean {
   );
 }
 
-function isInvalidArgumentError(error: unknown): boolean {
-  if (!isToolError(error) || error.code !== "COMMAND_FAILED") {
-    return false;
+function buildKeyActions(text: string): Array<{ type: "keyDown" | "keyUp"; value: string }> {
+  const out: Array<{ type: "keyDown" | "keyUp"; value: string }> = [];
+  for (const char of Array.from(text)) {
+    out.push({ type: "keyDown", value: char });
+    out.push({ type: "keyUp", value: char });
   }
-
-  const wdaError = lower(readDetail(error, "wdaError"));
-  const wdaMessage = lower(readDetail(error, "wdaMessage"));
-  return (
-    wdaError.includes("invalid argument") ||
-    wdaError.includes("invalidargument") ||
-    wdaMessage.includes("invalid argument")
-  );
+  return out;
 }
 
 function parseSessionId(payload: unknown): string | undefined {
@@ -338,29 +333,27 @@ export class WdaClient {
   }
 
   async typeText(deviceId: string, text: string): Promise<void> {
-    try {
-      await this.withSession(deviceId, async (sessionId) => {
-        try {
-          await this.requestJson<unknown>(`/session/${sessionId}/keys`, {
-            protocol: "w3c",
-            method: "POST",
-            timeoutMs: 5000,
-            body: { text },
-          });
-          return;
-        } catch (error) {
-          if (!isInvalidArgumentError(error)) {
-            throw error;
-          }
-        }
+    if (text.length === 0) {
+      return;
+    }
 
-        await this.requestJson<unknown>(`/session/${sessionId}/keys`, {
+    try {
+      await this.withSession(deviceId, (sessionId) =>
+        this.requestJson<unknown>(`/session/${sessionId}/actions`, {
           protocol: "w3c",
           method: "POST",
-          timeoutMs: 5000,
-          body: { value: text.split("") },
-        });
-      });
+          timeoutMs: 7000,
+          body: {
+            actions: [
+              {
+                type: "key",
+                id: "keyboard",
+                actions: buildKeyActions(text),
+              },
+            ],
+          },
+        }),
+      );
       return;
     } catch (error) {
       if (!isProtocolMismatchError(error)) {

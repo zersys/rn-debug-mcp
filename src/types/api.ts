@@ -168,6 +168,9 @@ export interface ScreenshotOutput extends Record<string, unknown> {
   mimeType: "image/png";
   width?: number;
   height?: number;
+  pointWidth?: number;
+  pointHeight?: number;
+  scaleFactor?: number;
   sessionId?: string;
   deviceId: string;
   capturedAt: string;
@@ -327,6 +330,7 @@ export interface ScreenTestIdsOutput extends Record<string, unknown> {
 export interface TapOutput extends Record<string, unknown> {
   tapped: true;
   method: "coordinates" | "element";
+  coordinateSpace?: "points" | "pixels";
   sessionId?: string;
   deviceId: string;
   x: number;

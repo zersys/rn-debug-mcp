@@ -270,6 +270,10 @@ export class IosAdapter {
     await this.wda.tap(deviceId, x, y);
   }
 
+  async getViewportSize(deviceId: string): Promise<{ width: number; height: number }> {
+    return this.wda.getWindowSize(deviceId);
+  }
+
   async typeText(deviceId: string, text: string, submit = false): Promise<void> {
     await this.wda.typeText(deviceId, text);
     if (submit) {
