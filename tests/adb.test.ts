@@ -11,13 +11,15 @@ import { ToolError } from "../src/core/toolError.js";
 
 class FakeRunner implements ProcessRunner {
   private execIndex = 0;
+  public readonly execCalls: Array<{ command: string; args: string[] }> = [];
 
   constructor(
     private readonly binaryResult: BinaryExecResult,
     private readonly execResults: ExecResult[] = [],
   ) {}
 
-  async exec(): Promise<ExecResult> {
+  async exec(command: string, args: string[]): Promise<ExecResult> {
+    this.execCalls.push({ command, args });
     const next = this.execResults[this.execIndex];
     this.execIndex += 1;
     return next ?? { stdout: "", stderr: "", exitCode: 0 };
@@ -134,4 +136,105 @@ test("AdbAdapter getUiTree applies pruning constraints", async () => {
   assert.equal(result.nodeCount, 2);
   assert.equal(result.root?.children.length, 1);
   assert.equal(result.root?.children[0]?.children.length, 0);
+});
+
+test("AdbAdapter gets activity and window dumps", async () => {
+  const adapter = new AdbAdapter(
+    new FakeRunner(
+      {
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        exitCode: 0,
+      },
+      [
+        { stdout: "activity dump", stderr: "", exitCode: 0 },
+        { stdout: "window dump", stderr: "", exitCode: 0 },
+      ],
+    ),
+  );
+
+  const activity = await adapter.getActivityDump("emulator-5554");
+  const window = await adapter.getWindowDump("emulator-5554");
+
+  assert.equal(activity, "activity dump");
+  assert.equal(window, "window dump");
+});
+
+test("AdbAdapter typeText escapes text and optionally submits", async () => {
+  const runner = new FakeRunner(
+    {
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      exitCode: 0,
+    },
+    [
+      { stdout: "", stderr: "", exitCode: 0 },
+      { stdout: "", stderr: "", exitCode: 0 },
+    ],
+  );
+  const adapter = new AdbAdapter(runner);
+
+  await adapter.typeText("emulator-5554", "hello world!", true);
+
+  assert.equal(runner.execCalls.length, 2);
+  assert.deepEqual(runner.execCalls[0], {
+    command: "adb",
+    args: ["-s", "emulator-5554", "shell", "input", "text", "hello%sworld\\!"],
+  });
+  assert.deepEqual(runner.execCalls[1], {
+    command: "adb",
+    args: ["-s", "emulator-5554", "shell", "input", "keyevent", "66"],
+  });
+});
+
+test("AdbAdapter pressBack sends back keyevent", async () => {
+  const runner = new FakeRunner(
+    {
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      exitCode: 0,
+    },
+    [{ stdout: "", stderr: "", exitCode: 0 }],
+  );
+  const adapter = new AdbAdapter(runner);
+
+  await adapter.pressBack("emulator-5554");
+
+  assert.equal(runner.execCalls.length, 1);
+  assert.deepEqual(runner.execCalls[0], {
+    command: "adb",
+    args: ["-s", "emulator-5554", "shell", "input", "keyevent", "4"],
+  });
+});
+
+test("AdbAdapter scroll calculates swipe coordinates from wm size", async () => {
+  const runner = new FakeRunner(
+    {
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      exitCode: 0,
+    },
+    [
+      { stdout: "Physical size: 1080x2160\n", stderr: "", exitCode: 0 },
+      { stdout: "", stderr: "", exitCode: 0 },
+    ],
+  );
+  const adapter = new AdbAdapter(runner);
+
+  const result = await adapter.scroll("emulator-5554", "down", 0.5, 420);
+  assert.deepEqual(result, {
+    from: { x: 540, y: 1620 },
+    to: { x: 540, y: 540 },
+    durationMs: 420,
+  });
+
+  assert.equal(runner.execCalls.length, 2);
+  assert.deepEqual(runner.execCalls[0], {
+    command: "adb",
+    args: ["-s", "emulator-5554", "shell", "wm", "size"],
+  });
+  assert.deepEqual(runner.execCalls[1], {
+    command: "adb",
+    args: ["-s", "emulator-5554", "shell", "input", "swipe", "540", "1620", "540", "540", "420"],
+  });
 });

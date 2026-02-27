@@ -1,9 +1,11 @@
 import { ToolError } from "../core/toolError.js";
 import { parseUiAutomatorXml, pruneUiTree, type UiTreePruneOptions } from "../core/uiTreeParser.js";
 import type { ProcessRunner, SpawnedProcess } from "./processRunner.js";
-import type { UiNode } from "../types/api.js";
+import type { ScrollDirection, UiNode } from "../types/api.js";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const DEFAULT_SCROLL_DISTANCE_RATIO = 0.5;
+const DEFAULT_SCROLL_DURATION_MS = 350;
 
 export interface AndroidDevice {
   id: string;
@@ -23,6 +25,12 @@ export interface UiTreeResult {
   clickableCount: number;
   truncated: boolean;
   source: "uiautomator";
+}
+
+export interface ScrollResult {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  durationMs: number;
 }
 
 function assertCommandSuccess(exitCode: number, stderr: string, action: string): void {
@@ -67,6 +75,15 @@ function parsePngDimensions(png: Buffer): { width?: number; height?: number } {
     width: png.readUInt32BE(16),
     height: png.readUInt32BE(20),
   };
+}
+
+function escapeAdbInputText(text: string): string {
+  const spaced = text.replace(/\s/g, "%s");
+  return spaced.replace(/([\\'"`$&|;<>()[\]{}*?!#~])/g, "\\$1");
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 export class AdbAdapter {
@@ -228,6 +245,114 @@ export class AdbAdapter {
     assertCommandSuccess(result.exitCode, result.stderr, "tap");
   }
 
+  async typeText(deviceId: string, text: string, submit = false): Promise<void> {
+    const escaped = escapeAdbInputText(text);
+    const typeResult = await this.runner.exec("adb", ["-s", deviceId, "shell", "input", "text", escaped], {
+      timeoutMs: 5000,
+    });
+    assertCommandSuccess(typeResult.exitCode, typeResult.stderr, "type text");
+
+    if (!submit) {
+      return;
+    }
+
+    const submitResult = await this.runner.exec("adb", ["-s", deviceId, "shell", "input", "keyevent", "66"], {
+      timeoutMs: 3000,
+    });
+    assertCommandSuccess(submitResult.exitCode, submitResult.stderr, "submit text");
+  }
+
+  async pressBack(deviceId: string): Promise<void> {
+    const result = await this.runner.exec("adb", ["-s", deviceId, "shell", "input", "keyevent", "4"], {
+      timeoutMs: 3000,
+    });
+    assertCommandSuccess(result.exitCode, result.stderr, "press back");
+  }
+
+  async scroll(
+    deviceId: string,
+    direction: ScrollDirection,
+    distanceRatio = DEFAULT_SCROLL_DISTANCE_RATIO,
+    durationMs = DEFAULT_SCROLL_DURATION_MS,
+  ): Promise<ScrollResult> {
+    const display = await this.getDisplaySize(deviceId);
+    const ratio = clamp(distanceRatio, 0.1, 0.9);
+    const duration = clamp(Math.floor(durationMs), 100, 5000);
+
+    const centerX = Math.floor(display.width / 2);
+    const centerY = Math.floor(display.height / 2);
+    const xTravel = Math.max(40, Math.floor(display.width * ratio));
+    const yTravel = Math.max(40, Math.floor(display.height * ratio));
+    const xDelta = Math.floor(xTravel / 2);
+    const yDelta = Math.floor(yTravel / 2);
+
+    let fromX = centerX;
+    let toX = centerX;
+    let fromY = centerY;
+    let toY = centerY;
+
+    if (direction === "down") {
+      fromY = centerY + yDelta;
+      toY = centerY - yDelta;
+    } else if (direction === "up") {
+      fromY = centerY - yDelta;
+      toY = centerY + yDelta;
+    } else if (direction === "right") {
+      fromX = centerX + xDelta;
+      toX = centerX - xDelta;
+    } else {
+      fromX = centerX - xDelta;
+      toX = centerX + xDelta;
+    }
+
+    const safeFromX = clamp(fromX, 1, Math.max(1, display.width - 1));
+    const safeToX = clamp(toX, 1, Math.max(1, display.width - 1));
+    const safeFromY = clamp(fromY, 1, Math.max(1, display.height - 1));
+    const safeToY = clamp(toY, 1, Math.max(1, display.height - 1));
+
+    const result = await this.runner.exec(
+      "adb",
+      [
+        "-s",
+        deviceId,
+        "shell",
+        "input",
+        "swipe",
+        String(safeFromX),
+        String(safeFromY),
+        String(safeToX),
+        String(safeToY),
+        String(duration),
+      ],
+      { timeoutMs: 5000 },
+    );
+    assertCommandSuccess(result.exitCode, result.stderr, "scroll");
+
+    return {
+      from: { x: safeFromX, y: safeFromY },
+      to: { x: safeToX, y: safeToY },
+      durationMs: duration,
+    };
+  }
+
+  async getActivityDump(deviceId: string): Promise<string> {
+    const result = await this.runner.exec(
+      "adb",
+      ["-s", deviceId, "shell", "dumpsys", "activity", "activities"],
+      { timeoutMs: 6000 },
+    );
+    assertCommandSuccess(result.exitCode, result.stderr, "dumpsys activity activities");
+    return result.stdout;
+  }
+
+  async getWindowDump(deviceId: string): Promise<string> {
+    const result = await this.runner.exec("adb", ["-s", deviceId, "shell", "dumpsys", "window", "windows"], {
+      timeoutMs: 6000,
+    });
+    assertCommandSuccess(result.exitCode, result.stderr, "dumpsys window windows");
+    return result.stdout;
+  }
+
   async getUiTree(deviceId: string, options: UiTreePruneOptions = {}): Promise<UiTreeResult> {
     const remotePath = "/sdcard/rndb-ui-dump.xml";
 
@@ -258,5 +383,29 @@ export class AdbAdapter {
       truncated: pruned.truncated,
       source: "uiautomator",
     };
+  }
+
+  private async getDisplaySize(deviceId: string): Promise<{ width: number; height: number }> {
+    const result = await this.runner.exec("adb", ["-s", deviceId, "shell", "wm", "size"], {
+      timeoutMs: 4000,
+    });
+    assertCommandSuccess(result.exitCode, result.stderr, "wm size");
+
+    const physicalMatch = result.stdout.match(/Physical size:\s*(\d+)x(\d+)/i);
+    const fallbackMatch = result.stdout.match(/(\d+)x(\d+)/);
+    const match = physicalMatch ?? fallbackMatch;
+    if (!match) {
+      throw new ToolError("COMMAND_FAILED", "Failed to parse Android display size", {
+        outputPreview: result.stdout.slice(0, 120),
+      });
+    }
+
+    const width = Number.parseInt(match[1], 10);
+    const height = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+      throw new ToolError("COMMAND_FAILED", "Invalid Android display size", { width, height });
+    }
+
+    return { width, height };
   }
 }

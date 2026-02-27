@@ -5,9 +5,10 @@ import { AdbAdapter } from "./adapters/adb.js";
 import { MetroAdapter } from "./adapters/metro.js";
 import { NodeProcessRunner } from "./adapters/processRunner.js";
 import { LogBuffer } from "./core/logBuffer.js";
+import { NetworkBuffer } from "./core/networkBuffer.js";
 import { SessionManager } from "./core/sessionManager.js";
 import { registerTools } from "./server/registerTools.js";
-import { DEFAULT_LOG_BUFFER_SIZE } from "./types/api.js";
+import { DEFAULT_LOG_BUFFER_SIZE, DEFAULT_NETWORK_BUFFER_SIZE } from "./types/api.js";
 
 const server = new McpServer({
   name: "react-native-debug-bridge-mcp",
@@ -20,6 +21,7 @@ const sessionManager = new SessionManager();
 registerTools(server, {
   sessionManager,
   logBuffer: new LogBuffer(DEFAULT_LOG_BUFFER_SIZE),
+  networkBuffer: new NetworkBuffer(DEFAULT_NETWORK_BUFFER_SIZE),
   adb: new AdbAdapter(processRunner),
   metro: new MetroAdapter(),
 });

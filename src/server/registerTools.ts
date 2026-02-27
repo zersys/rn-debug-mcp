@@ -4,42 +4,69 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { parseLogcatLine, isErrorLevel } from "../core/logParser.js";
+import { parseNetworkEvent } from "../core/networkParser.js";
 import { retryWithBackoff } from "../core/retry.js";
 import { SessionManager } from "../core/sessionManager.js";
 import { ToolError } from "../core/toolError.js";
-import { extractVisibleElements } from "../core/visibleElements.js";
+import { buildScreenContext } from "../core/screenContext.js";
+import { buildRemediationPlan } from "../core/testIdRemediation.js";
+import { extractScreenTestIds, extractVisibleElements } from "../core/visibleElements.js";
 import type { ScreenshotResult } from "../adapters/adb.js";
 import type { SpawnedProcess } from "../adapters/processRunner.js";
 import type { LogBuffer } from "../core/logBuffer.js";
+import type { NetworkBuffer } from "../core/networkBuffer.js";
 import {
   DEFAULT_LOG_LIMIT,
+  DEFAULT_NETWORK_LIMIT,
   DEFAULT_METRO_PORT,
   MAX_LOG_LIMIT,
+  MAX_NETWORK_LIMIT,
   connectAppInputSchema,
   connectionStatusInputSchema,
   disconnectAppInputSchema,
+  getScreenContextInputSchema,
+  getTestIdRemediationPlanInputSchema,
   getElementsByTestIdInputSchema,
+  getNetworkRequestsInputSchema,
+  getScreenTestIdsInputSchema,
   getVisibleElementsInputSchema,
   getUiTreeInputSchema,
   getLogsInputSchema,
+  pressBackInputSchema,
   reloadAppInputSchema,
+  scrollInputSchema,
   tapElementInputSchema,
   tapInputSchema,
   takeScreenshotInputSchema,
+  typeTextInputSchema,
   type ConnectionStatusOutput,
   type ConnectAppOutput,
   type DisconnectAppOutput,
+  type NetworkRequestEntry,
+  type GetNetworkRequestsInput,
+  type GetNetworkRequestsOutput,
   type LogEntry,
+  type PressBackOutput,
+  type GetScreenTestIdsInput,
+  type ScrollOutput,
+  type ScreenContextOutput,
   type GetElementsByTestIdInput,
   type GetVisibleElementsInput,
   type GetLogsInput,
   type GetLogsOutput,
+  type GetTestIdRemediationPlanInput,
   type GetUiTreeInput,
+  type RecommendedFallback,
+  type ResolutionStrategy,
   type ReloadAppOutput,
   type ScreenshotOutput,
   type TapElementInput,
   type TapOutput,
+  type TestIdRemediationPlanOutput,
   type ToolErrorData,
+  type TypeTextInput,
+  type TypeTextOutput,
+  type ScreenTestIdsOutput,
   type VisibleElementsOutput,
   type TestIdMatch,
   type UiNode,
@@ -49,6 +76,7 @@ import {
 export interface ToolDependencies {
   sessionManager: SessionManager;
   logBuffer: LogBuffer;
+  networkBuffer: NetworkBuffer;
   adb: AdbToolAdapter;
   metro: MetroToolAdapter;
 }
@@ -60,6 +88,16 @@ export interface AdbToolAdapter {
   reloadViaBroadcast(deviceId: string): Promise<void>;
   reloadViaKeyEvents(deviceId: string): Promise<void>;
   tap(deviceId: string, x: number, y: number): Promise<void>;
+  typeText(deviceId: string, text: string, submit?: boolean): Promise<void>;
+  pressBack(deviceId: string): Promise<void>;
+  scroll(
+    deviceId: string,
+    direction: "up" | "down" | "left" | "right",
+    distanceRatio?: number,
+    durationMs?: number,
+  ): Promise<{ from: { x: number; y: number }; to: { x: number; y: number }; durationMs: number }>;
+  getActivityDump(deviceId: string): Promise<string>;
+  getWindowDump(deviceId: string): Promise<string>;
   takeScreenshot(deviceId: string): Promise<ScreenshotResult>;
   getUiTree(deviceId: string, options?: { maxDepth?: number; maxNodes?: number }): Promise<{
     root?: UiTreeOutput["root"];
@@ -122,6 +160,14 @@ function clampLimit(limit?: number): number {
   return Math.max(1, Math.min(MAX_LOG_LIMIT, limit));
 }
 
+function clampNetworkLimit(limit?: number): number {
+  if (!limit) {
+    return DEFAULT_NETWORK_LIMIT;
+  }
+
+  return Math.max(1, Math.min(MAX_NETWORK_LIMIT, limit));
+}
+
 const CONNECT_RETRY = {
   retries: 3,
   initialDelayMs: 250,
@@ -143,9 +189,11 @@ const INTERACTION_RETRY = {
   maxDelayMs: 800,
 };
 
-const DEFAULT_UI_TREE_MAX_DEPTH = 18;
-const DEFAULT_UI_TREE_MAX_NODES = 1200;
+const DEFAULT_UI_TREE_MAX_DEPTH = 40;
+const DEFAULT_UI_TREE_MAX_NODES = 5000;
 const DEFAULT_VISIBLE_ELEMENTS_LIMIT = 150;
+const DEFAULT_SCREEN_TEST_IDS_LIMIT = 300;
+const REMEDIATION_CANDIDATE_LIMIT = 20;
 
 function isTransientToolError(error: unknown): boolean {
   if (!(error instanceof ToolError)) {
@@ -177,6 +225,50 @@ function applyLogFilters(entry: LogEntry, input: GetLogsInput): boolean {
     const tagLower = entry.tag.toLowerCase();
     const allowed = input.tags.some((candidate) => candidate.toLowerCase() === tagLower);
     if (!allowed) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function applyNetworkFilters(entry: NetworkRequestEntry, input: GetNetworkRequestsInput): boolean {
+  if (input.sources && input.sources.length > 0 && !input.sources.includes(entry.source)) {
+    return false;
+  }
+
+  if (input.phases && input.phases.length > 0 && !input.phases.includes(entry.phase)) {
+    return false;
+  }
+
+  if (input.methods && input.methods.length > 0) {
+    if (!entry.method) {
+      return false;
+    }
+
+    const method = entry.method.toUpperCase();
+    const allowed = input.methods.some((candidate) => candidate.toUpperCase() === method);
+    if (!allowed) {
+      return false;
+    }
+  }
+
+  if (input.statuses && input.statuses.length > 0) {
+    if (entry.status === undefined) {
+      return false;
+    }
+
+    if (!input.statuses.includes(entry.status)) {
+      return false;
+    }
+  }
+
+  if (input.urlContains) {
+    if (!entry.url) {
+      return false;
+    }
+
+    if (!entry.url.toLowerCase().includes(input.urlContains.toLowerCase())) {
       return false;
     }
   }
@@ -234,6 +326,7 @@ function resolveVisibleOptions(input: GetVisibleElementsInput): {
   limit: number;
   clickableOnly: boolean;
   includeTextless: boolean;
+  skipVisibilityCheck: boolean;
   testId?: string;
   testIdMatch: TestIdMatch;
 } {
@@ -243,24 +336,87 @@ function resolveVisibleOptions(input: GetVisibleElementsInput): {
     limit: input.limit ?? DEFAULT_VISIBLE_ELEMENTS_LIMIT,
     clickableOnly: input.clickableOnly ?? true,
     includeTextless: input.includeTextless ?? false,
+    skipVisibilityCheck: input.skipVisibilityCheck ?? true,
     testId: input.testId,
     testIdMatch: input.testIdMatch ?? "exact",
   };
 }
 
-export function registerTools(server: McpServer, deps: ToolDependencies): void {
-  const { sessionManager, logBuffer, adb, metro } = deps;
+function resolveScreenTestIdsOptions(input: GetScreenTestIdsInput): {
+  maxDepth: number;
+  maxNodes: number;
+  limit: number;
+  includeNonClickable: boolean;
+  includeInvisible: boolean;
+} {
+  return {
+    maxDepth: input.maxDepth ?? DEFAULT_UI_TREE_MAX_DEPTH,
+    maxNodes: input.maxNodes ?? DEFAULT_UI_TREE_MAX_NODES,
+    limit: input.limit ?? DEFAULT_SCREEN_TEST_IDS_LIMIT,
+    includeNonClickable: input.includeNonClickable ?? true,
+    includeInvisible: input.includeInvisible ?? true,
+  };
+}
 
-  server.tool(
+function resolutionStrategyFor(
+  testId: string | undefined,
+  testIdMatch: TestIdMatch,
+  matchedCount: number,
+): ResolutionStrategy {
+  if (!testId || matchedCount === 0) {
+    return "none";
+  }
+
+  return testIdMatch === "contains" ? "test_id_contains" : "test_id_exact";
+}
+
+function recommendedFallbackFor(params: {
+  hasTestIdQuery: boolean;
+  matchedCount: number;
+  hasAnyElements: boolean;
+}): RecommendedFallback {
+  if (params.matchedCount > 0) {
+    return "tap_element";
+  }
+
+  if (params.hasTestIdQuery) {
+    return "add_test_id";
+  }
+
+  return params.hasAnyElements ? "tap_element" : "tap_coordinates";
+}
+
+async function getScreenContextForSession(session: { deviceId: string }, adb: AdbToolAdapter): Promise<ScreenContextOutput> {
+  const [activityDump, windowDump, uiTree] = await Promise.all([
+    adb.getActivityDump(session.deviceId).catch(() => ""),
+    adb.getWindowDump(session.deviceId).catch(() => ""),
+    adb
+      .getUiTree(session.deviceId, { maxDepth: DEFAULT_UI_TREE_MAX_DEPTH, maxNodes: DEFAULT_UI_TREE_MAX_NODES })
+      .catch(() => null),
+  ]);
+
+  return buildScreenContext({
+    deviceId: session.deviceId,
+    capturedAt: new Date().toISOString(),
+    activityDump,
+    windowDump,
+    uiRoot: uiTree?.root,
+  });
+}
+
+export function registerTools(server: McpServer, deps: ToolDependencies): void {
+  const { sessionManager, logBuffer, networkBuffer, adb, metro } = deps;
+
+  server.registerTool(
     "connect_app",
-    "Connect to a running React Native app on Android emulator and start log collection.",
-    connectAppInputSchema.shape,
+    { description: "Connect to a running React Native app on Android emulator and start log collection.", inputSchema: connectAppInputSchema.shape },
     async (input): Promise<ToolResult> => {
       let beganConnecting = false;
       try {
         sessionManager.beginConnecting();
         beganConnecting = true;
         logBuffer.clear();
+        networkBuffer.clear();
 
         await retryWithBackoff(() => adb.checkAvailability(), {
           ...CONNECT_RETRY,
@@ -282,6 +438,10 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
             adb.startLogcat(deviceId, (line) => {
               const parsed = parseLogcatLine(line);
               logBuffer.append(parsed);
+              const networkEvent = parseNetworkEvent(line);
+              if (networkEvent) {
+                networkBuffer.append(networkEvent);
+              }
             }),
           {
             ...CONNECT_RETRY,
@@ -311,11 +471,18 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
             "reload_app",
             "get_logs",
             "get_errors",
+            "get_network_requests",
+            "get_screen_context",
             "get_ui_tree",
             "get_visible_elements",
+            "get_screen_test_ids",
             "get_elements_by_test_id",
+            "get_test_id_remediation_plan",
             "tap",
             "tap_element",
+            "type_text",
+            "press_back",
+            "scroll",
             "take_screenshot",
           ],
         };
@@ -330,10 +497,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_connection_status",
-    "Get current RN Inspector MCP session status and log buffer state.",
-    connectionStatusInputSchema.shape,
+    { description: "Get current RN Inspector MCP session status and log buffer state.", inputSchema: connectionStatusInputSchema.shape },
     async (): Promise<ToolResult> => {
       try {
         const state = sessionManager.getState();
@@ -343,6 +509,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           metroPort: state.metroPort,
           startedAt: state.startedAt,
           logBufferSize: logBuffer.size(),
+          networkBufferSize: networkBuffer.size(),
         };
         return ok(payload);
       } catch (error) {
@@ -351,14 +518,14 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "disconnect_app",
-    "Disconnect the active React Native app session.",
-    disconnectAppInputSchema.shape,
+    { description: "Disconnect the active React Native app session.", inputSchema: disconnectAppInputSchema.shape },
     async (): Promise<ToolResult> => {
       try {
         await sessionManager.reset();
         logBuffer.clear();
+        networkBuffer.clear();
 
         const payload: DisconnectAppOutput = { disconnected: true };
         return ok(payload);
@@ -368,10 +535,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "reload_app",
-    "Reload the active app session via Metro, with ADB fallback.",
-    reloadAppInputSchema.shape,
+    { description: "Reload the active app session via Metro, with ADB fallback.", inputSchema: reloadAppInputSchema.shape },
     async (): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
@@ -405,10 +571,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_logs",
-    "Read buffered non-error logs using cursor-based pagination.",
-    getLogsInputSchema.shape,
+    { description: "Read buffered non-error logs using cursor-based pagination.", inputSchema: getLogsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         sessionManager.requireConnected();
@@ -431,10 +596,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_errors",
-    "Read buffered error and fatal logs using cursor-based pagination.",
-    getLogsInputSchema.shape,
+    { description: "Read buffered error and fatal logs using cursor-based pagination.", inputSchema: getLogsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         sessionManager.requireConnected();
@@ -457,10 +621,88 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
+    "get_network_requests",
+    {
+      description: "Read buffered network request/response/error events using cursor-based pagination.",
+      inputSchema: getNetworkRequestsInputSchema.shape,
+    },
+    async (input): Promise<ToolResult> => {
+      try {
+        sessionManager.requireConnected();
+
+        const result = networkBuffer.query({
+          sinceCursor: input.sinceCursor,
+          limit: clampNetworkLimit(input.limit),
+          predicate: (entry) => applyNetworkFilters(entry, input),
+        });
+
+        const payload: GetNetworkRequestsOutput = {
+          nextCursor: result.nextCursor,
+          items: result.items,
+        };
+
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_screen_context",
+    { description: "Get inferred current Android screen context for remediation guidance. Use after testID lookup fails.", inputSchema: getScreenContextInputSchema.shape },
+    async (): Promise<ToolResult> => {
+      try {
+        const session = sessionManager.requireConnected();
+        const payload = await getScreenContextForSession(session, adb);
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_test_id_remediation_plan",
+    { description: "Build deterministic patch/remediation guidance when a desired testID is missing. Recommended flow: get_screen_test_ids -> get_elements_by_test_id (exact/contains) -> this tool -> reload_app -> retry lookup.", inputSchema: getTestIdRemediationPlanInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        const typedInput = input as GetTestIdRemediationPlanInput;
+        const session = sessionManager.requireConnected();
+        const screenContext = await getScreenContextForSession(session, adb);
+        const uiTree = await adb
+          .getUiTree(session.deviceId, {
+            maxDepth: DEFAULT_UI_TREE_MAX_DEPTH,
+            maxNodes: DEFAULT_UI_TREE_MAX_NODES,
+          })
+          .catch(() => null);
+
+        const candidates = extractVisibleElements(uiTree?.root, {
+          limit: REMEDIATION_CANDIDATE_LIMIT,
+          clickableOnly: true,
+          includeTextless: false,
+          skipVisibilityCheck: true,
+          testId: undefined,
+          testIdMatch: "exact",
+        }).elements;
+
+        const payload: TestIdRemediationPlanOutput = buildRemediationPlan({
+          input: typedInput,
+          screenContext,
+          elementCandidates: candidates,
+        });
+
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
     "get_ui_tree",
-    "Read the Android accessibility hierarchy via UIAutomator XML dump.",
-    getUiTreeInputSchema.shape,
+    { description: "Read the Android accessibility hierarchy via UIAutomator XML dump.", inputSchema: getUiTreeInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
@@ -487,10 +729,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_visible_elements",
-    "Return flattened visible Android accessibility elements derived from the current UI tree.",
-    getVisibleElementsInputSchema.shape,
+    { description: "Return flattened visible Android accessibility elements derived from the current UI tree. Use as fallback discovery after testID-first lookup.", inputSchema: getVisibleElementsInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
@@ -504,6 +745,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           limit: options.limit,
           clickableOnly: options.clickableOnly,
           includeTextless: options.includeTextless,
+          skipVisibilityCheck: options.skipVisibilityCheck,
           testId: options.testId,
           testIdMatch: options.testIdMatch,
         });
@@ -520,8 +762,15 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           limit: options.limit,
           clickableOnly: options.clickableOnly,
           includeTextless: options.includeTextless,
+          skipVisibilityCheck: options.skipVisibilityCheck,
           queryTestId: options.testId,
           testIdMatch: options.testIdMatch,
+          resolutionStrategy: resolutionStrategyFor(options.testId, options.testIdMatch, extracted.elements.length),
+          recommendedFallback: recommendedFallbackFor({
+            hasTestIdQuery: Boolean(options.testId),
+            matchedCount: extracted.elements.length,
+            hasAnyElements: uiTree.nodeCount > 0,
+          }),
           truncated: uiTree.truncated || extracted.totalCandidates > extracted.elements.length,
           elements: extracted.elements,
         };
@@ -533,10 +782,51 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
+    "get_screen_test_ids",
+    { description: "List testIDs present on the current screen with metadata. Start UI interaction flows with this tool before get_elements_by_test_id.", inputSchema: getScreenTestIdsInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        const session = sessionManager.requireConnected();
+        const options = resolveScreenTestIdsOptions(input);
+        const uiTree = await adb.getUiTree(session.deviceId, {
+          maxDepth: options.maxDepth,
+          maxNodes: options.maxNodes,
+        });
+
+        const extracted = extractScreenTestIds(uiTree.root, {
+          limit: options.limit,
+          includeNonClickable: options.includeNonClickable,
+          includeInvisible: options.includeInvisible,
+        });
+
+        const payload: ScreenTestIdsOutput = {
+          platform: "android",
+          source: uiTree.source,
+          deviceId: session.deviceId,
+          capturedAt: new Date().toISOString(),
+          maxDepth: options.maxDepth,
+          maxNodes: options.maxNodes,
+          limit: options.limit,
+          includeNonClickable: options.includeNonClickable,
+          includeInvisible: options.includeInvisible,
+          count: extracted.testIds.length,
+          totalCandidates: extracted.totalCandidates,
+          testIds: extracted.testIds,
+          elements: extracted.elements,
+          truncated: uiTree.truncated || extracted.totalCandidates > extracted.elements.length,
+        };
+
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
     "get_elements_by_test_id",
-    "Find visible Android elements matching a React Native testID (from resource-id tail).",
-    getElementsByTestIdInputSchema.shape,
+    { description: "Find visible Android elements matching a React Native testID (from resource-id tail). Use exact first, then contains. If none, call get_screen_context + get_test_id_remediation_plan.", inputSchema: getElementsByTestIdInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
@@ -550,6 +840,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           limit: options.limit,
           clickableOnly: options.clickableOnly,
           includeTextless: options.includeTextless,
+          skipVisibilityCheck: options.skipVisibilityCheck,
           testId: input.testId,
           testIdMatch: options.testIdMatch,
         });
@@ -566,8 +857,15 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
           limit: options.limit,
           clickableOnly: options.clickableOnly,
           includeTextless: options.includeTextless,
+          skipVisibilityCheck: options.skipVisibilityCheck,
           queryTestId: input.testId,
           testIdMatch: options.testIdMatch,
+          resolutionStrategy: resolutionStrategyFor(input.testId, options.testIdMatch, extracted.elements.length),
+          recommendedFallback: recommendedFallbackFor({
+            hasTestIdQuery: true,
+            matchedCount: extracted.elements.length,
+            hasAnyElements: uiTree.nodeCount > 0,
+          }),
           truncated: uiTree.truncated || extracted.totalCandidates > extracted.elements.length,
           elements: extracted.elements,
         };
@@ -579,10 +877,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "tap",
-    "Tap the Android screen at absolute coordinates.",
-    tapInputSchema.shape,
+    { description: "Tap the Android screen at absolute coordinates. Final fallback only when testID and element-based targeting fail.", inputSchema: tapInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
@@ -606,10 +903,87 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
+    "type_text",
+    { description: "Type text into the currently focused Android input field, with optional submit/enter key press.", inputSchema: typeTextInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        const typedInput = input as TypeTextInput;
+        const session = sessionManager.requireConnected();
+        const submit = typedInput.submit ?? false;
+        await retryWithBackoff(() => adb.typeText(session.deviceId, typedInput.text, submit), {
+          ...INTERACTION_RETRY,
+          shouldRetry: isTransientToolError,
+        });
+
+        const payload: TypeTextOutput = {
+          typed: true,
+          deviceId: session.deviceId,
+          textLength: typedInput.text.length,
+          submitted: submit,
+        };
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "press_back",
+    { description: "Press Android back button (keyevent 4).", inputSchema: pressBackInputSchema.shape },
+    async (): Promise<ToolResult> => {
+      try {
+        const session = sessionManager.requireConnected();
+        await retryWithBackoff(() => adb.pressBack(session.deviceId), {
+          ...INTERACTION_RETRY,
+          shouldRetry: isTransientToolError,
+        });
+
+        const payload: PressBackOutput = {
+          pressed: true,
+          key: "back",
+          deviceId: session.deviceId,
+        };
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "scroll",
+    { description: "Scroll screen content in a direction via swipe gesture.", inputSchema: scrollInputSchema.shape },
+    async (input): Promise<ToolResult> => {
+      try {
+        const session = sessionManager.requireConnected();
+        const result = await retryWithBackoff(
+          () => adb.scroll(session.deviceId, input.direction, input.distanceRatio, input.durationMs),
+          {
+            ...INTERACTION_RETRY,
+            shouldRetry: isTransientToolError,
+          },
+        );
+
+        const payload: ScrollOutput = {
+          scrolled: true,
+          direction: input.direction,
+          deviceId: session.deviceId,
+          from: result.from,
+          to: result.to,
+          durationMs: result.durationMs,
+        };
+        return ok(payload);
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
     "tap_element",
-    "Tap a visible element by element id from get_visible_elements/get_ui_tree.",
-    tapElementInputSchema.shape,
+    { description: "Tap a visible element by element id from get_visible_elements/get_ui_tree. Preferred fallback before coordinate tapping.", inputSchema: tapElementInputSchema.shape },
     async (input): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
@@ -648,10 +1022,9 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "take_screenshot",
-    "Capture a screenshot from the connected Android device.",
-    takeScreenshotInputSchema.shape,
+    { description: "Capture a screenshot from the connected Android device.", inputSchema: takeScreenshotInputSchema.shape },
     async (): Promise<ToolResult> => {
       try {
         const session = sessionManager.requireConnected();
