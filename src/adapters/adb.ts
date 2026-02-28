@@ -354,7 +354,7 @@ export class AdbAdapter {
   }
 
   async getUiTree(deviceId: string, options: UiTreePruneOptions = {}): Promise<UiTreeResult> {
-    const remotePath = "/sdcard/rndb-ui-dump.xml";
+    const remotePath = "/sdcard/rndmcp-ui-dump.xml";
 
     const dump = await this.runner.exec(
       "adb",

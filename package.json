@@ -1,12 +1,12 @@
 {
-  "name": "@rndb/server",
+  "name": "@rn-debug/mcp",
   "version": "0.1.0",
-  "description": "React Native Debug Bridge MCP server",
+  "description": "RN Debug MCP server",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
   "bin": {
-    "rndb": "dist/src/index.js"
+    "rndmcp": "dist/src/index.js"
   },
   "files": [
     "dist/src",

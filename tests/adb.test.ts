@@ -90,7 +90,7 @@ test("AdbAdapter getUiTree parses UIAutomator XML", async () => {
         exitCode: 0,
       },
       [
-        { stdout: "UI hierchary dumped to: /sdcard/rndb-ui-dump.xml\n", stderr: "", exitCode: 0 },
+        { stdout: "UI hierchary dumped to: /sdcard/rndmcp-ui-dump.xml\n", stderr: "", exitCode: 0 },
         { stdout: xml, stderr: "", exitCode: 0 },
       ],
     ),

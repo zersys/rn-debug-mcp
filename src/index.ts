@@ -16,8 +16,8 @@ import { DEFAULT_IOS_WDA_BASE_URL, DEFAULT_LOG_BUFFER_SIZE, DEFAULT_NETWORK_BUFF
 function usage(): string {
   return [
     "Usage:",
-    "  rndb                     Start MCP server over stdio",
-    "  rndb install wda         Clone WebDriverAgent into this package",
+    "  rndmcp                   Start MCP server over stdio",
+    "  rndmcp install wda       Clone WebDriverAgent into this package",
   ].join("\n");
 }
 
@@ -31,13 +31,13 @@ async function maybeHandleCliCommand(args: string[]): Promise<boolean> {
     try {
       const result = await ensureWdaInstalled();
       if (result.installed) {
-        process.stdout.write(`[rndb:wda] Installed WebDriverAgent at ${result.projectPath}\n`);
+        process.stdout.write(`[rndmcp:wda] Installed WebDriverAgent at ${result.projectPath}\n`);
       } else {
-        process.stdout.write(`[rndb:wda] WebDriverAgent already present at ${result.projectPath}\n`);
+        process.stdout.write(`[rndmcp:wda] WebDriverAgent already present at ${result.projectPath}\n`);
       }
       return true;
     } catch (error) {
-      process.stderr.write(`[rndb:wda] ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`[rndmcp:wda] ${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;
       return true;
     }
@@ -55,7 +55,7 @@ async function maybeHandleCliCommand(args: string[]): Promise<boolean> {
 
 async function startServer(): Promise<void> {
   const server = new McpServer({
-    name: "react-native-debug-bridge-mcp",
+    name: "rn-debug-mcp",
     version: "0.1.0",
   });
 

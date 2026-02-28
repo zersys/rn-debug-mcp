@@ -1,4 +1,4 @@
-# React Native Debug Bridge MCP
+# RN Debug MCP
 
 A TypeScript MCP server that gives AI agents a unified React Native debugging loop over stdio for Android emulator and iOS simulator.
 
@@ -105,7 +105,7 @@ WebDriverAgent sources are kept in `./WebDriverAgent` and are not intended to be
 Install WDA explicitly when needed:
 
 ```bash
-npx --no-install rndb install wda
+npx --no-install rndmcp install wda
 ```
 
 If you want a project-level shortcut, add this in your app `package.json`:
@@ -113,12 +113,12 @@ If you want a project-level shortcut, add this in your app `package.json`:
 ```json
 {
   "scripts": {
-    "wda:install": "rndb install wda"
+    "wda:install": "rndmcp install wda"
   }
 }
 ```
 
-Do not use `npm rndb install wda` (invalid npm command).
+Do not use `npm rndmcp install wda` (invalid npm command).
 
 ## Start WebDriverAgent (iOS)
 
@@ -152,7 +152,7 @@ npm test
 - `connect_app` defaults to `platform: "android"` for backward compatibility.
 - If iOS connect reports missing WebDriverAgent, either:
   - set `WDA_BASE_URL` to an already running WDA server, or
-  - run `rndb install wda` to download local WDA sources.
+  - run `rndmcp install wda` to download local WDA sources.
 - Reload fallback strategies:
   - Android: ADB broadcast/key events
   - iOS simulator: `Cmd+R` keyboard trigger via `osascript`

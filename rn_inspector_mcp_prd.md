@@ -256,13 +256,12 @@ Without human assistance.
 
 | Item | Value |
 |----|----|
-| Display Name | React Native Debug Bridge MCP |
-| GitHub Repo | react-native-debug-bridge-mcp |
-| NPM Package | @rndb/server |
-| CLI Command | rndb |
-| Docs URL | rndb.dev (future) |
+| Display Name | RN Debug MCP |
+| GitHub Repo | rn-debug-mcp |
+| NPM Package | @rn-debug/mcp |
+| CLI Command | rndmcp |
+| Docs URL | rndmcp.dev (future) |
 
 ---
 
 END OF DOCUMENT
-

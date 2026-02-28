@@ -9,7 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `rndb install wda` CLI command to clone WebDriverAgent sources locally.
+- `rndmcp install wda` CLI command to clone WebDriverAgent sources locally.
 - Open-source project metadata and policy docs:
   - `LICENSE`
   - `CONTRIBUTING.md`
@@ -26,4 +26,4 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Initial public release of React Native Debug Bridge MCP server.
+- Initial public release of RN Debug MCP server.

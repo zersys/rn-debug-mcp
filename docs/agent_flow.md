@@ -1,6 +1,6 @@
 # Agent Interaction Flow (Android + iOS)
 
-This document defines the default runtime policy for Claude/Codex style agents using RN Debug Bridge MCP.
+This document defines the default runtime policy for Claude/Codex style agents using RN Debug MCP.
 
 ## Session setup
 

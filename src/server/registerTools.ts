@@ -1333,7 +1333,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         const session = sessionManager.requireConnected(input.sessionId);
         const screenshot = await (session.platform === "ios" ? ios : adb).takeScreenshot(session.deviceId);
         const imageBase64 = screenshot.png.toString("base64");
-        const tempPath = join(tmpdir(), `rndb-screenshot-${Date.now()}-${randomUUID()}.png`);
+        const tempPath = join(tmpdir(), `rndmcp-screenshot-${Date.now()}-${randomUUID()}.png`);
         await writeFile(tempPath, screenshot.png);
 
         const pixelWidth = screenshot.width;

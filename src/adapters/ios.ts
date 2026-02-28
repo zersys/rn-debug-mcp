@@ -19,7 +19,7 @@ const DEFAULT_WDA_POLL_INITIAL_DELAY_MS = 300;
 const DEFAULT_WDA_POLL_FACTOR = 1.6;
 const DEFAULT_WDA_POLL_MAX_DELAY_MS = 2500;
 const DEFAULT_WDA_LOG_TAIL_CHARS = 6000;
-const WDA_SETUP_HINT = 'Set WDA_BASE_URL to a running WebDriverAgent, or run "rndb install wda" to download it.';
+const WDA_SETUP_HINT = 'Set WDA_BASE_URL to a running WebDriverAgent, or run "rndmcp install wda" to download it.';
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
 function findPackageRoot(startDir: string): string {
@@ -239,7 +239,7 @@ export class IosAdapter {
   }
 
   async takeScreenshot(deviceId: string): Promise<IosScreenshotResult> {
-    const tempFile = join(tmpdir(), `rndb-ios-shot-${Date.now()}-${randomUUID()}.png`);
+    const tempFile = join(tmpdir(), `rndmcp-ios-shot-${Date.now()}-${randomUUID()}.png`);
     const capture = await this.runner.exec("xcrun", ["simctl", "io", deviceId, "screenshot", tempFile], {
       timeoutMs: 7000,
     });
