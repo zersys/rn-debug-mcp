@@ -19,6 +19,7 @@ const DEFAULT_WDA_POLL_INITIAL_DELAY_MS = 300;
 const DEFAULT_WDA_POLL_FACTOR = 1.6;
 const DEFAULT_WDA_POLL_MAX_DELAY_MS = 2500;
 const DEFAULT_WDA_LOG_TAIL_CHARS = 6000;
+const WDA_SETUP_HINT = 'Set WDA_BASE_URL to a running WebDriverAgent, or run "rndb install wda" to download it.';
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
 function findPackageRoot(startDir: string): string {
@@ -393,6 +394,18 @@ export class IosAdapter {
     const timeoutMs = envNumber("WDA_START_TIMEOUT_MS", DEFAULT_WDA_START_TIMEOUT_MS);
     const tailChars = envNumber("WDA_LOG_TAIL_CHARS", DEFAULT_WDA_LOG_TAIL_CHARS);
 
+    if (!existsSync(projectPath)) {
+      throw new ToolError(
+        "IOS_UNAVAILABLE",
+        `WebDriverAgent project not found at '${projectPath}'. ${WDA_SETUP_HINT}`,
+        {
+          deviceId,
+          projectPath,
+          hint: WDA_SETUP_HINT,
+        },
+      );
+    }
+
     const spawned = this.runner.spawn("xcodebuild", [
       "-project",
       projectPath,
@@ -447,6 +460,7 @@ export class IosAdapter {
           deviceId,
           projectPath,
           scheme,
+          hint: WDA_SETUP_HINT,
           exitCode: outcome.exit.code,
           signal: outcome.exit.signal,
           stdout: stdoutTail,
@@ -461,6 +475,7 @@ export class IosAdapter {
       deviceId,
       projectPath,
       scheme,
+      hint: WDA_SETUP_HINT,
       timeoutMs,
       stdout: stdoutTail,
       stderr: stderrTail,

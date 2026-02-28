@@ -2,14 +2,27 @@
   "name": "@rndb/server",
   "version": "0.1.0",
   "description": "React Native Debug Bridge MCP server",
+  "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
   "bin": {
     "rndb": "dist/src/index.js"
   },
+  "files": [
+    "dist/src",
+    "scripts/ios-wda.sh",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "wda:install": "node dist/src/index.js install wda",
     "ios:wda": "sh scripts/ios-wda.sh",
     "pretest": "npm run build",
     "test": "node --test dist/tests/**/*.test.js"
