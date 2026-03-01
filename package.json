@@ -1,6 +1,6 @@
 {
   "name": "rn-debug-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "RN Debug MCP server",
   "license": "MIT",
   "type": "module",
