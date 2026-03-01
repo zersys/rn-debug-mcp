@@ -6,6 +6,15 @@ import { fileURLToPath } from "node:url";
 export const DEFAULT_WDA_REPO_URL = "https://github.com/appium/WebDriverAgent.git";
 export const DEFAULT_WDA_GIT_REF = "v11.1.6";
 
+/** Minimal interface so wdaInstaller doesn't depend on ProcessRunner directly. */
+export interface WdaExecRunner {
+  exec(
+    command: string,
+    args: string[],
+    options?: { cwd?: string; timeoutMs?: number },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+}
+
 function findPackageRoot(startDir: string): string {
   let current = startDir;
   while (true) {
@@ -52,6 +61,8 @@ export async function ensureWdaInstalled(options?: {
   packageRoot?: string;
   repoUrl?: string;
   gitRef?: string;
+  runner?: WdaExecRunner;
+  onProgress?: (msg: string) => void;
 }): Promise<{ installed: boolean; projectPath: string }> {
   const packageRoot = options?.packageRoot ?? modulePackageRoot();
   const projectPath = getWdaProjectPath(packageRoot);
@@ -66,7 +77,20 @@ export async function ensureWdaInstalled(options?: {
 
   const repoUrl = options?.repoUrl ?? process.env.WDA_REPO_URL ?? DEFAULT_WDA_REPO_URL;
   const gitRef = options?.gitRef ?? process.env.WDA_GIT_REF ?? DEFAULT_WDA_GIT_REF;
-  await run("git", ["clone", "--depth", "1", "--branch", gitRef, repoUrl, "WebDriverAgent"], packageRoot);
+  const cloneArgs = ["clone", "--depth", "1", "--branch", gitRef, repoUrl, "WebDriverAgent"];
+
+  options?.onProgress?.(`Cloning WebDriverAgent ${gitRef} from ${repoUrl}...`);
+
+  if (options?.runner) {
+    const result = await options.runner.exec("git", cloneArgs, { cwd: packageRoot, timeoutMs: 120_000 });
+    if (result.exitCode !== 0) {
+      throw new Error(`git clone failed (code=${result.exitCode}): ${result.stderr}`);
+    }
+  } else {
+    await run("git", cloneArgs, packageRoot);
+  }
+
+  options?.onProgress?.("WebDriverAgent clone complete.");
 
   if (!existsSync(projectPath)) {
     throw new Error(`Clone completed, but expected project is missing at '${projectPath}'.`);

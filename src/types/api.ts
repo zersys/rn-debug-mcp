@@ -88,6 +88,7 @@ export interface ConnectAppOutput extends Record<string, unknown> {
   metroPort: number;
   startedAt: string;
   capabilities: string[];
+  setupSteps?: string[];
 }
 
 export interface SessionScopedInput {

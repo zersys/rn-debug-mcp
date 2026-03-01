@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parseWdaUiTree, type WdaUiTreeResult } from "../core/wdaUiParser.js";
 import { ToolError } from "../core/toolError.js";
+import { ensureWdaInstalled } from "../cli/wdaInstaller.js";
 import type { ScrollDirection } from "../types/api.js";
 import type { ProcessRunner, SpawnedProcess } from "./processRunner.js";
 import { WdaClient } from "./wda.js";
@@ -19,7 +20,9 @@ const DEFAULT_WDA_POLL_INITIAL_DELAY_MS = 300;
 const DEFAULT_WDA_POLL_FACTOR = 1.6;
 const DEFAULT_WDA_POLL_MAX_DELAY_MS = 2500;
 const DEFAULT_WDA_LOG_TAIL_CHARS = 6000;
-const WDA_SETUP_HINT = 'Set WDA_BASE_URL to a running WebDriverAgent, or run "rndmcp install wda" to download it.';
+const WDA_SETUP_HINT =
+  'Set WDA_BASE_URL to a running WebDriverAgent, or run "rndmcp install wda" to download it. ' +
+  "To allow automatic installation, unset WDA_NO_AUTO_INSTALL.";
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
 function findPackageRoot(startDir: string): string {
@@ -131,11 +134,17 @@ function findServerUrlInLogChunk(text: string): string | undefined {
 
 export class IosAdapter {
   private ensureWdaInFlight?: Promise<SpawnedProcess | undefined>;
+  private onProgress?: (msg: string) => void;
+  public setupSteps: string[] = [];
 
   constructor(
     private readonly runner: ProcessRunner,
     private readonly wda: WdaClient,
   ) {}
+
+  setProgressCallback(cb: (msg: string) => void): void {
+    this.onProgress = cb;
+  }
 
   async checkAvailability(): Promise<void> {
     const result = await this.runner.exec("xcrun", ["simctl", "list", "devices", "--json"], { timeoutMs: 5000 });
@@ -144,6 +153,7 @@ export class IosAdapter {
 
   async ensureWdaReady(deviceId: string): Promise<SpawnedProcess | undefined> {
     if (!this.ensureWdaInFlight) {
+      this.setupSteps = [];
       this.ensureWdaInFlight = this.ensureWdaReadyInternal(deviceId).finally(() => {
         this.ensureWdaInFlight = undefined;
       });
@@ -395,16 +405,37 @@ export class IosAdapter {
     const tailChars = envNumber("WDA_LOG_TAIL_CHARS", DEFAULT_WDA_LOG_TAIL_CHARS);
 
     if (!existsSync(projectPath)) {
-      throw new ToolError(
-        "IOS_UNAVAILABLE",
-        `WebDriverAgent project not found at '${projectPath}'. ${WDA_SETUP_HINT}`,
-        {
-          deviceId,
-          projectPath,
-          hint: WDA_SETUP_HINT,
-        },
-      );
+      if (process.env.WDA_NO_AUTO_INSTALL) {
+        throw new ToolError(
+          "IOS_UNAVAILABLE",
+          `WebDriverAgent project not found at '${projectPath}'. ${WDA_SETUP_HINT}`,
+          {
+            deviceId,
+            projectPath,
+            hint: WDA_SETUP_HINT,
+          },
+        );
+      }
+
+      this.onProgress?.("Auto-installing WebDriverAgent...");
+      await ensureWdaInstalled({
+        packageRoot: PACKAGE_ROOT,
+        runner: this.runner,
+        onProgress: this.onProgress,
+      });
+      this.setupSteps.push("wda_auto_installed");
+      this.onProgress?.("WebDriverAgent installed.");
+
+      if (!existsSync(projectPath)) {
+        throw new ToolError(
+          "IOS_UNAVAILABLE",
+          `Auto-install completed but WebDriverAgent project still missing at '${projectPath}'.`,
+          { deviceId, projectPath },
+        );
+      }
     }
+
+    this.onProgress?.("Building WebDriverAgent...");
 
     const spawned = this.runner.spawn("xcodebuild", [
       "-project",
@@ -442,6 +473,8 @@ export class IosAdapter {
       try {
         await this.wda.checkStatus();
         await this.wda.ensureSession(deviceId);
+        this.setupSteps.push("wda_built");
+        this.onProgress?.("WebDriverAgent ready.");
         return spawned;
       } catch {
         // Continue retrying until timeout or process exits.

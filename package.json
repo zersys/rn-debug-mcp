@@ -1,5 +1,5 @@
 {
-  "name": "@rn-debug/mcp",
+  "name": "rn-debug-mcp",
   "version": "0.1.0",
   "description": "RN Debug MCP server",
   "license": "MIT",
@@ -16,8 +16,7 @@
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
-    "SECURITY.md",
-    ".env.example"
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

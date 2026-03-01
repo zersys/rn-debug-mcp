@@ -1,126 +1,101 @@
 # RN Debug MCP
 
-A TypeScript MCP server that gives AI agents a unified React Native debugging loop over stdio for Android emulator and iOS simulator.
+A TypeScript MCP server for React Native debugging and interaction on Android emulator and iOS simulator.
 
-## Implemented Tools
+RN Debug MCP gives agents a single loop for:
 
-- `connect_app({ platform?, deviceId?, metroPort? })`
-- `list_sessions({})`
-- `set_active_session({ sessionId })`
-- `close_session({ sessionId })`
-- `get_connection_status({ sessionId? })`
-- `disconnect_app({ sessionId? })`
-- `reload_app({ sessionId? })`
-- `get_logs({ sessionId?, sinceCursor?, limit?, levels?, tags?, sources? })`
-- `get_errors({ sessionId?, sinceCursor?, limit?, levels?, tags?, sources? })`
-- `get_network_requests({ sessionId?, sinceCursor?, limit?, phases?, methods?, statuses?, urlContains?, sources? })`
-- `get_screen_context({ sessionId? })`
-- `get_ui_tree({ sessionId?, maxDepth?, maxNodes? })`
-- `get_visible_elements({ sessionId?, maxDepth?, maxNodes?, limit?, clickableOnly?, includeTextless?, skipVisibilityCheck?, testId?, testIdMatch? })`
-- `get_screen_test_ids({ sessionId?, maxDepth?, maxNodes?, limit?, includeNonClickable?, includeInvisible? })`
-- `get_elements_by_test_id({ sessionId?, testId, maxDepth?, maxNodes?, limit?, clickableOnly?, includeTextless?, skipVisibilityCheck?, testIdMatch? })`
-- `get_test_id_remediation_plan({ sessionId?, desiredAction, desiredTestId?, matchMode? })`
-- `tap({ sessionId?, x, y })`
-- `tap_element({ sessionId?, elementId, maxDepth?, maxNodes? })`
-- `type_text({ sessionId?, text, submit? })`
-- `press_back({ sessionId? })`
-- `scroll({ sessionId?, direction, distanceRatio?, durationMs? })`
-- `take_screenshot({ sessionId? })`
+- connecting to a running app
+- reading logs, errors, network events, and UI state
+- interacting with the app (tap/type/scroll/back)
+- iterating quickly with reload and testID-first targeting
 
-## Behavior Highlights
+## Features
 
 - Multi-session support with explicit `sessionId` routing.
-- Android + iOS platform selection via `connect_app({ platform })`.
-- Emulator/simulator auto-selection when `deviceId` is omitted.
-- Metro health check via `http://127.0.0.1:<port>/status`.
-- Hybrid bridge:
-  - Metro: status/reload/probe.
-  - Android: ADB logcat runtime collection.
-  - iOS: `xcrun simctl ... log stream` runtime collection.
-- Network inspection pipeline from logcat-derived request/response/error events (`get_network_requests`).
-- Transient retry/backoff for connect/reload/interaction operations.
-- Collector auto-reconnect status surfaced in `get_connection_status`.
-- Cursor-based log polling from in-memory ring buffer.
-- Log filtering support in `get_logs` and `get_errors` by level, tag (case-insensitive), and source.
+- Android + iOS support via `connect_app({ platform })`.
+- Metro integration for status checks and app reload.
+- Runtime log collection:
+  - Android: `adb logcat`
+  - iOS: `xcrun simctl log stream`
+- Network event extraction with cursor-based polling.
 - UI hierarchy extraction:
   - Android via `uiautomator dump`
-  - iOS via WDA source (`source: "wda"`)
-- Flattened visible element extraction for planning (`get_visible_elements`).
-- testID-aware element lookup (`get_elements_by_test_id`) using `resource-id` tail matching.
-- screen-wide testID discovery (`get_screen_test_ids`) to let agents discover available IDs before lookup.
-- Visibility filtering is off by default for element lookup (`skipVisibilityCheck: true`) to work better with React Native accessibility trees; set `skipVisibilityCheck: false` to enforce `visibleToUser`.
-- Clickability filtering is off by default (`clickableOnly: false`) so iOS/RN tappable elements with missing clickable flags are still discoverable; set `clickableOnly: true` for strict actionable-only matching.
-- `get_screen_test_ids` defaults to `includeInvisible: true` for React Native compatibility; set `includeInvisible: false` for strict visible-only discovery.
-- Screen context inference (`get_screen_context`) from activity/window dumps + UI titles.
-- Guided testID remediation plans (`get_test_id_remediation_plan`) for Claude/Codex patch loops.
-- Direct interaction without screenshots via coordinate tap and element-id tap (`tap`, `tap_element`) on both platforms.
-- `tap` coordinate contract: Android expects pixels; iOS expects points (WDA coordinate space).
-- Keyboard/navigation gestures for flows (`type_text`, `press_back`, `scroll`).
-- Screenshot output includes pixel and point metrics (`width/height`, `pointWidth/pointHeight`, `scaleFactor`) as MCP `image` content, and the PNG is also saved to OS temp path (`tempPath`).
-
-## Recommended Agent Flow (TestID-first)
-
-1. `get_elements_by_test_id` with `testIdMatch: "exact"`.
-2. If unknown IDs, run `get_screen_test_ids` first.
-3. If empty, retry `get_elements_by_test_id` with `testIdMatch: "contains"`.
-4. If still empty:
-   - call `get_screen_context`
-   - call `get_test_id_remediation_plan`
-   - patch app code with suggested testID
-   - call `reload_app`
-   - retry exact testID lookup
-5. If unresolved:
-   - `tap_element` from visible candidates
-   - final fallback: `tap({ x, y })`
-     - iOS note: pass point coordinates. If using screenshot pixels, convert first:
-       `pointX = round(pixelX / scaleFactor)`, `pointY = round(pixelY / scaleFactor)`
-   - if navigation/input is needed: `scroll`, `press_back`, `type_text`
-
-testID naming convention: `screen.element.action` (example: `checkout.submit.button`).
+  - iOS via WebDriverAgent (`source: "wda"`)
+- React Native testID-focused tools:
+  - `get_screen_test_ids`
+  - `get_elements_by_test_id`
+  - `get_test_id_remediation_plan`
+- Direct interaction tools: `tap`, `tap_element`, `type_text`, `press_back`, `scroll`.
+- Screenshot output as MCP `image` content plus saved temp PNG path.
 
 ## Requirements
 
 - Node.js 20+
-- Android SDK / `adb` on PATH
-- Xcode command line tools (`xcrun`) and iOS Simulator
-- WebDriverAgent running and reachable (`http://127.0.0.1:8100` by default; override with `WDA_BASE_URL`)
-- React Native app running on Android emulator or iOS simulator
-- Metro running (default port `8081`)
+- Android SDK / `adb` on `PATH`
+- Xcode command line tools (`xcrun`) and iOS Simulator (for iOS)
+- React Native app running on emulator/simulator
+- Metro running (default: `8081`)
+- WebDriverAgent reachable for iOS (default: `http://127.0.0.1:8100`)
 
-## Setup
+## Quickstart
 
 ```bash
 npm install
 npm run build
+node dist/src/index.js
 ```
 
-Optional local env file:
+## MCP Client Configuration
 
-```bash
-cp .env.example .env
+Use the published package in any MCP-compatible client:
+
+```json
+{
+  "mcpServers": {
+    "rn-debug": {
+      "command": "npx",
+      "args": ["-y", "rn-debug-mcp"],
+      "env": {
+        "WDA_BASE_URL": "http://127.0.0.1:8100"
+      }
+    }
+  }
+}
 ```
 
-WebDriverAgent sources are kept in `./WebDriverAgent` and are not intended to be tracked in git.
+For local development from this repo, keep using:
 
-Install WDA explicitly when needed:
+```json
+{
+  "mcpServers": {
+    "rn-debug": {
+      "command": "node",
+      "args": ["/ABS/PATH/react_native_debug_bridge_mcp/dist/src/index.js"],
+      "env": {
+        "WDA_BASE_URL": "http://127.0.0.1:8100"
+      }
+    }
+  }
+}
+```
+
+## iOS Support
+
+iOS works automatically on first `connect_app({ platform: "ios" })`. WebDriverAgent sources are cloned and built transparently if not already present.
+
+- If WDA is already running on `:8100` (or the configured `WDA_BASE_URL`), the install/build is skipped entirely.
+- Set `WDA_NO_AUTO_INSTALL=1` to disable automatic installation and require manual setup.
+- Set `WDA_BASE_URL` to point to an externally managed WebDriverAgent instance.
+
+### Manual / Advanced Setup
+
+Install WDA sources manually:
 
 ```bash
 npx --no-install rndmcp install wda
 ```
 
-If you want a project-level shortcut, add this in your app `package.json`:
-
-```json
-{
-  "scripts": {
-    "wda:install": "rndmcp install wda"
-  }
-}
-```
-
-Do not use `npm rndmcp install wda` (invalid npm command).
-
-## Start WebDriverAgent (iOS)
+Run WDA standalone:
 
 ```bash
 npm run ios:wda
@@ -134,25 +109,94 @@ WDA_DEVICE_ID="<booted-simulator-udid>" npm run ios:wda
 WDA_DESTINATION='platform=iOS Simulator,name=iPhone 16' npm run ios:wda
 ```
 
-## Run Server (stdio)
+WebDriverAgent sources are kept in `./WebDriverAgent` and are not tracked in git.
 
-```bash
-node dist/src/index.js
-```
+## Tools
 
-## Development Commands
+### Session and Connection
+
+- `connect_app({ platform?, deviceId?, metroPort? })`
+- `list_sessions({})`
+- `set_active_session({ sessionId })`
+- `close_session({ sessionId })`
+- `get_connection_status({ sessionId? })`
+- `disconnect_app({ sessionId? })`
+- `reload_app({ sessionId? })`
+
+### Logs, Errors, and Network
+
+- `get_logs({ sessionId?, sinceCursor?, limit?, levels?, tags?, sources? })`
+- `get_errors({ sessionId?, sinceCursor?, limit?, levels?, tags?, sources? })`
+- `get_network_requests({ sessionId?, sinceCursor?, limit?, phases?, methods?, statuses?, urlContains?, sources? })`
+
+### UI and Context
+
+- `get_screen_context({ sessionId? })`
+- `get_ui_tree({ sessionId?, maxDepth?, maxNodes? })`
+- `get_visible_elements({ sessionId?, maxDepth?, maxNodes?, limit?, clickableOnly?, includeTextless?, skipVisibilityCheck?, testId?, testIdMatch? })`
+- `get_screen_test_ids({ sessionId?, maxDepth?, maxNodes?, limit?, includeNonClickable?, includeInvisible? })`
+- `get_elements_by_test_id({ sessionId?, testId, maxDepth?, maxNodes?, limit?, clickableOnly?, includeTextless?, skipVisibilityCheck?, testIdMatch? })`
+- `get_test_id_remediation_plan({ sessionId?, desiredAction, desiredTestId?, matchMode? })`
+
+### Interaction
+
+- `tap({ sessionId?, x, y })`
+- `tap_element({ sessionId?, elementId, maxDepth?, maxNodes? })`
+- `type_text({ sessionId?, text, submit? })`
+- `press_back({ sessionId? })`
+- `scroll({ sessionId?, direction, distanceRatio?, durationMs? })`
+- `take_screenshot({ sessionId? })`
+
+## Recommended Agent Flow (testID-first)
+
+1. `get_elements_by_test_id` with `testIdMatch: "exact"`.
+2. If unknown IDs, call `get_screen_test_ids`.
+3. If empty, retry `get_elements_by_test_id` with `testIdMatch: "contains"`.
+4. If still empty:
+   - call `get_screen_context`
+   - call `get_test_id_remediation_plan`
+   - patch app code with suggested testID
+   - call `reload_app`
+   - retry exact testID lookup
+5. If unresolved:
+   - try `tap_element` from visible candidates
+   - fallback to `tap({ x, y })`
+   - use `scroll`, `press_back`, and `type_text` for navigation/input
+
+testID naming convention: `screen.element.action` (example: `checkout.submit.button`).
+
+## Platform Notes
+
+- `connect_app` defaults to `platform: "android"` for backward compatibility.
+- iOS tap coordinates use point space (WDA coordinates), not screenshot pixels.
+- If converting screenshot pixels to iOS points:
+  - `pointX = round(pixelX / scaleFactor)`
+  - `pointY = round(pixelY / scaleFactor)`
+- `get_elements_by_test_id` defaults:
+  - `skipVisibilityCheck: true` (RN-friendly)
+  - `clickableOnly: false` (broader matching)
+- `get_screen_test_ids` default: `includeInvisible: true`.
+
+## Development
 
 ```bash
 npm run typecheck
 npm test
 ```
 
-## Notes
+CLI usage:
 
-- `connect_app` defaults to `platform: "android"` for backward compatibility.
-- If iOS connect reports missing WebDriverAgent, either:
-  - set `WDA_BASE_URL` to an already running WDA server, or
-  - run `rndmcp install wda` to download local WDA sources.
-- Reload fallback strategies:
+```bash
+rndmcp                   # Start MCP server over stdio
+rndmcp install wda       # Clone WebDriverAgent into this package
+```
+
+## Troubleshooting
+
+- iOS connect reports missing WDA:
+  - WDA is auto-installed on first `connect_app({ platform: "ios" })` unless `WDA_NO_AUTO_INSTALL=1`
+  - set `WDA_BASE_URL` to an already running WDA, or
+  - run `rndmcp install wda` and then `npm run ios:wda` for manual setup
+- Reload fallbacks:
   - Android: ADB broadcast/key events
   - iOS simulator: `Cmd+R` keyboard trigger via `osascript`

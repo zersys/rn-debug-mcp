@@ -153,6 +153,8 @@ export interface IosToolAdapter {
     source: "wda";
   }>;
   getActiveAppInfo(deviceId: string): Promise<{ bundleId?: string; name?: string }>;
+  setProgressCallback?(cb: (msg: string) => void): void;
+  setupSteps?: string[];
 }
 
 interface ToolResult {
@@ -597,6 +599,10 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
         );
 
         if (platform === "ios") {
+          ios.setProgressCallback?.((msg) => {
+            server.sendLoggingMessage({ level: "info", logger: "rndmcp:wda", data: msg })
+              .catch(() => {});
+          });
           startedWdaProcess = await retryWithBackoff(() => ios.ensureWdaReady(deviceId), {
             ...CONNECT_RETRY,
             retries: 1,
@@ -686,6 +692,7 @@ export function registerTools(server: McpServer, deps: ToolDependencies): void {
             "scroll",
             "take_screenshot",
           ],
+          ...(platform === "ios" && ios.setupSteps && ios.setupSteps.length > 0 ? { setupSteps: [...ios.setupSteps] } : {}),
         };
 
         return ok(payload);
