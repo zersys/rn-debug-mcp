@@ -1,7 +1,15 @@
 {
   "name": "rn-debug-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "RN Debug MCP server",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zersys/rn-debug-mcp.git"
+  },
+  "homepage": "https://github.com/zersys/rn-debug-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/zersys/rn-debug-mcp/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -30,8 +38,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.0",
-    "zod": "^3.24.1"
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
