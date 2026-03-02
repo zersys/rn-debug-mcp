@@ -4,6 +4,10 @@ Let AI agents see, understand, and interact with your React Native app running o
 
 Point your MCP client at this server and an agent can connect to your app, read logs, inspect the UI, tap buttons, type text, scroll, take screenshots, and reload — all without leaving the conversation.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="RN Debug MCP demo" width="800" />
+</p>
+
 ## Features
 
 ### Connect and Control
