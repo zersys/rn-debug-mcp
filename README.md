@@ -1,32 +1,36 @@
 # RN Debug MCP
 
-A TypeScript MCP server for React Native debugging and interaction on Android emulator and iOS simulator.
+Let AI agents see, understand, and interact with your React Native app running on Android emulator or iOS simulator — through a single MCP server.
 
-RN Debug MCP gives agents a single loop for:
-
-- connecting to a running app
-- reading logs, errors, network events, and UI state
-- interacting with the app (tap/type/scroll/back)
-- iterating quickly with reload and testID-first targeting
+Point your MCP client at this server and an agent can connect to your app, read logs, inspect the UI, tap buttons, type text, scroll, take screenshots, and reload — all without leaving the conversation.
 
 ## Features
 
-- Multi-session support with explicit `sessionId` routing.
-- Android + iOS support via `connect_app({ platform })`.
-- Metro integration for status checks and app reload.
-- Runtime log collection:
-  - Android: `adb logcat`
-  - iOS: `xcrun simctl log stream`
-- Network event extraction with cursor-based polling.
-- UI hierarchy extraction:
-  - Android via `uiautomator dump`
-  - iOS via WebDriverAgent (`source: "wda"`)
-- React Native testID-focused tools:
-  - `get_screen_test_ids`
-  - `get_elements_by_test_id`
-  - `get_test_id_remediation_plan`
-- Direct interaction tools: `tap`, `tap_element`, `type_text`, `press_back`, `scroll`.
-- Screenshot output as MCP `image` content plus saved temp PNG path.
+### Connect and Control
+
+- **Android + iOS** — one server handles both platforms
+- **Multi-session** — debug multiple devices or apps at the same time
+- **Hot reload** — reload your app instantly via Metro; automatic fallback to native reload when Metro is unavailable
+
+### See What's Happening
+
+- **Live logs** — stream device logs in real time (Android `logcat` / iOS `simctl`)
+- **Error filtering** — surface only errors so the agent focuses on what matters
+- **Network inspector** — capture HTTP requests and responses with cursor-based polling
+- **Screenshots** — capture the screen as a PNG image the agent can see inline
+
+### Understand the UI
+
+- **UI tree** — get the full view hierarchy (Android UIAutomator / iOS WebDriverAgent)
+- **Visible elements** — list what's on screen with text, bounds, and testIDs
+- **Screen context** — get the current activity/screen name so the agent knows where it is
+
+### Interact with the App
+
+- **Tap, scroll, type, back** — drive the app like a real user
+- **Tap by testID** — target elements by `testID` instead of fragile coordinates
+- **testID discovery** — list all testIDs on screen, search by exact or partial match
+- **testID remediation** — when a testID is missing, the agent gets a ready-to-paste code fix and can reload to verify
 
 ## Requirements
 
@@ -39,15 +43,13 @@ RN Debug MCP gives agents a single loop for:
 
 ## Quickstart
 
+### Option A: Global install (use from any project)
+
 ```bash
-npm install
-npm run build
-node dist/src/index.js
+npm install -g rn-debug-mcp
 ```
 
-## MCP Client Configuration
-
-Use the published package in any MCP-compatible client:
+Add to your MCP client config:
 
 ```json
 {
@@ -63,14 +65,21 @@ Use the published package in any MCP-compatible client:
 }
 ```
 
-For local development from this repo, keep using:
+### Option B: Local dev dependency (per-project)
+
+```bash
+npm install -D rn-debug-mcp
+npm run build
+```
+
+Add to your MCP client config:
 
 ```json
 {
   "mcpServers": {
     "rn-debug": {
       "command": "node",
-      "args": ["/ABS/PATH/react_native_debug_bridge_mcp/dist/src/index.js"],
+      "args": ["/ABS/PATH/TO/node_modules/rn-debug-mcp/dist/src/index.js"],
       "env": {
         "WDA_BASE_URL": "http://127.0.0.1:8100"
       }
@@ -108,8 +117,6 @@ WDA_PROJECT_PATH="/abs/path/to/WebDriverAgent.xcodeproj" npm run ios:wda
 WDA_DEVICE_ID="<booted-simulator-udid>" npm run ios:wda
 WDA_DESTINATION='platform=iOS Simulator,name=iPhone 16' npm run ios:wda
 ```
-
-WebDriverAgent sources are kept in `./WebDriverAgent` and are not tracked in git.
 
 ## Tools
 
