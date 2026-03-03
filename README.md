@@ -1,4 +1,4 @@
-# RN Debug MCP
+# React Native Debug MCP
 
 Let AI agents see, understand, and interact with your React Native app running on Android emulator or iOS simulator — through a single MCP server.
 
